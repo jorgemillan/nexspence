@@ -24,7 +24,14 @@ func TestUnpackIndexTarGz_RejectsNonGzip(t *testing.T) {
 }
 
 func TestPathArch(t *testing.T) {
+	// Single-level layout: the arch is the only directory component.
 	assert.Equal(t, "x86_64", pathArch("/x86_64/APKINDEX.tar.gz"))
 	assert.Equal(t, "aarch64", pathArch("/aarch64/curl-8.9.0-r0.apk"))
 	assert.Equal(t, "", pathArch("/"))
+
+	// Alpine's real published layout is "/<branch>/<repo>/<arch>/..." — the
+	// arch is the LAST directory component, not the first one (PR #440
+	// review: taking the first segment used to return "v3.20"/"edge" here).
+	assert.Equal(t, "x86_64", pathArch("/v3.20/main/x86_64/APKINDEX.tar.gz"))
+	assert.Equal(t, "aarch64", pathArch("/edge/community/aarch64/APKINDEX.tar.gz"))
 }

@@ -144,6 +144,34 @@ func TestChecksumQ1_SkipsMultipleSignatureMembers(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// TestDecompressOneGzipMember_RejectsMemberOverMaxBytes pins the PR #440
+// review fix: a gzip member that decompresses to more than maxMemberBytes
+// must be rejected outright, not silently truncated at the limit with no
+// error (which used to leave countingReader's byte count wrong, corrupting
+// whatever segment followed and producing a checksum no real client would
+// reproduce).
+func TestDecompressOneGzipMember_RejectsMemberOverMaxBytes(t *testing.T) {
+	oversized := bytes.Repeat([]byte{'a'}, maxMemberBytes+1)
+	member := gzipMember(oversized)
+
+	_, _, err := decompressOneGzipMember(member)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+}
+
+// TestChecksumQ1_RejectsOversizedControlMember confirms the overflow error
+// surfaces all the way up through controlSegment/checksumQ1 — the path
+// handleUpload actually calls — instead of being swallowed somewhere along
+// the way.
+func TestChecksumQ1_RejectsOversizedControlMember(t *testing.T) {
+	oversizedControl := bytes.Repeat([]byte{'a'}, maxMemberBytes+1)
+	data := []byte("data-tar-gz-payload")
+	apk := fakeApk(oversizedControl, data)
+
+	_, err := checksumQ1(apk)
+	require.Error(t, err)
+}
+
 func TestChecksumQ1_OnlySignatureMembers_Errors(t *testing.T) {
 	sig := tarWith(t, ".SIGN.RSA.key1.rsa.pub", []byte("sig"))
 	_, err := checksumQ1(gzipMember(sig))

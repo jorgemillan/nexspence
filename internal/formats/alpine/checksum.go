@@ -74,9 +74,20 @@ func decompressOneGzipMember(data []byte) (consumed int, raw []byte, err error) 
 		return 0, nil, fmt.Errorf("not a gzip-framed segment: %w", err)
 	}
 	gz.Multistream(false) // stop after this member instead of chaining into the next
-	raw, err = io.ReadAll(io.LimitReader(gz, maxMemberBytes))
+	// Read one byte past the limit so an oversized member is rejected
+	// outright instead of silently truncated: io.ReadAll against a plain
+	// io.LimitReader(gz, maxMemberBytes) would stop exactly at the limit with
+	// no error, the gzip trailer would never be consumed, and countingReader
+	// would then under-count how many source bytes this member actually
+	// occupies — corrupting whatever segment follows it and producing a
+	// checksum no real apk client reproduces, while the upload is still
+	// accepted with 201 (PR #440 review).
+	raw, err = io.ReadAll(io.LimitReader(gz, maxMemberBytes+1))
 	if err != nil {
 		return 0, nil, err
+	}
+	if len(raw) > maxMemberBytes {
+		return 0, nil, fmt.Errorf("alpine: gzip member exceeds %d bytes", maxMemberBytes)
 	}
 	if cr.n > int64(len(data)) {
 		return 0, nil, errors.New("gzip member longer than the remaining input")

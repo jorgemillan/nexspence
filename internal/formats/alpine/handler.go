@@ -84,8 +84,7 @@ func (h *Handler) serveHosted(c *gin.Context, repoName, p string) {
 }
 
 func (h *Handler) serveIndex(c *gin.Context, repoName, p string) {
-	arch := pathArch(p)
-	plain, err := h.buildIndex(c.Request.Context(), repoName, arch)
+	plain, err := h.buildIndex(c.Request.Context(), repoName, p)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

@@ -151,6 +151,38 @@ func TestAlpine_Index_FiltersByArch(t *testing.T) {
 	assert.Equal(t, "", plain, "aarch64 package must not appear in the x86_64 index")
 }
 
+// TestAlpine_Index_FiltersByArch_MultiLevelLayout pins the PR #440 review
+// fix: Alpine's real published layout nests the arch directory under
+// "/<branch>/<repo>/", e.g. "/edge/community/x86_64/...". Filtering by a bare
+// "/"+arch+"/" prefix would match every arch sharing that branch/repo path;
+// the fix filters by the exact directory instead.
+func TestAlpine_Index_FiltersByArch_MultiLevelLayout(t *testing.T) {
+	repo := testutil.SimpleRepo("apks4b", "alpine")
+	r := setup(repo)
+	require.Equal(t, http.StatusCreated,
+		putApk(r, "apks4b", "/edge/community/x86_64/curl-8.9.0-r0.apk", fakeApk([]byte("c1"), []byte("d1"))))
+	require.Equal(t, http.StatusCreated,
+		putApk(r, "apks4b", "/edge/community/aarch64/vim-9.0-r1.apk", fakeApk([]byte("c2"), []byte("d2"))))
+
+	req := httptest.NewRequest(http.MethodGet, "/repository/apks4b/edge/community/x86_64/APKINDEX.tar.gz", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	x86Plain, err := unpackIndexTarGz(w.Body.Bytes())
+	require.NoError(t, err)
+	assert.Contains(t, x86Plain, "P:curl")
+	assert.NotContains(t, x86Plain, "P:vim", "aarch64 package under the same branch/repo must not appear in the x86_64 index")
+
+	req = httptest.NewRequest(http.MethodGet, "/repository/apks4b/edge/community/aarch64/APKINDEX.tar.gz", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	armPlain, err := unpackIndexTarGz(w.Body.Bytes())
+	require.NoError(t, err)
+	assert.Contains(t, armPlain, "P:vim")
+	assert.NotContains(t, armPlain, "P:curl", "x86_64 package under the same branch/repo must not appear in the aarch64 index")
+}
+
 func TestAlpine_Delete(t *testing.T) {
 	repo := testutil.SimpleRepo("apks5", "alpine")
 	r := setup(repo)

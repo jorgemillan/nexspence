@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 
 	"github.com/nexspence-oss/nexspence/internal/domain"
@@ -23,16 +24,26 @@ import (
 // data into memory.
 const maxIndexEntryBytes = 64 << 20
 
-// buildIndex generates the plain-text APKINDEX for one architecture. Only
+// buildIndex generates the plain-text APKINDEX for one architecture,
+// identified by the full request path (e.g. "/x86_64/APKINDEX.tar.gz" or, in
+// Alpine's real published layout, "/v3.20/main/x86_64/APKINDEX.tar.gz"). Only
 // packages whose checksum was computed at upload time (see handleUpload) are
 // listed — one that failed checksumming would otherwise publish an index
 // entry no real apk client could ever install.
-func (h *Handler) buildIndex(ctx context.Context, repoName, arch string) ([]byte, error) {
-	page, err := h.deps.Components.Search(ctx, domain.SearchParams{Repository: repoName, Limit: 1000})
+func (h *Handler) buildIndex(ctx context.Context, repoName, p string) ([]byte, error) {
+	arch := pathArch(p)
+	// Filter assets by the exact directory the index was requested under, not
+	// just by the trailing arch segment — a bare "/"+arch+"/" prefix would
+	// also match a sibling architecture under the same branch/repo path (e.g.
+	// "/v3.20/main/x86_64/" and "/v3.20/main/aarch64/" both start with
+	// "/v3.20/"), mixing every architecture into one index (PR #440 review).
+	prefix := path.Dir(p) + "/"
+
+	page, err := h.deps.Components.Search(ctx, domain.SearchParams{Repository: repoName, Limit: 1000}) // see #443: hardcoded page size shared with apt/cran
 	if err != nil {
 		return nil, err
 	}
-	assetPage, err := h.deps.Assets.List(ctx, repoName, 1000, 0)
+	assetPage, err := h.deps.Assets.List(ctx, repoName, 1000, 0) // see #443: hardcoded page size shared with apt/cran
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +52,6 @@ func (h *Handler) buildIndex(ctx context.Context, repoName, arch string) ([]byte
 		compByID[page.Items[i].ID] = &page.Items[i]
 	}
 
-	prefix := "/" + arch + "/"
 	var sb strings.Builder
 	for _, a := range assetPage.Items {
 		if !strings.HasSuffix(a.Path, ".apk") || !strings.HasPrefix(a.Path, prefix) {
@@ -121,13 +131,19 @@ func extraInt64(v any) (int64, bool) {
 	}
 }
 
-// pathArch extracts the architecture segment from "/<arch>/...".
+// pathArch extracts the architecture segment from an apk-protocol path — the
+// last directory component before the file name. This works for both a
+// single-level layout ("/x86_64/APKINDEX.tar.gz" -> "x86_64") and Alpine's
+// real published multi-level layout ("/v3.20/main/x86_64/APKINDEX.tar.gz" ->
+// "x86_64", not "v3.20": taking the first path segment, as this function used
+// to, silently matched the wrong directory and mixed architectures together —
+// see PR #440 review).
 func pathArch(p string) string {
-	trimmed := strings.TrimPrefix(p, "/")
-	if idx := strings.IndexByte(trimmed, '/'); idx >= 0 {
-		return trimmed[:idx]
+	dir := path.Dir(p)
+	if dir == "/" || dir == "." {
+		return ""
 	}
-	return trimmed
+	return path.Base(dir)
 }
 
 // packIndexTarGz wraps a plain-text APKINDEX in the single-entry tar.gz that
