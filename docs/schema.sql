@@ -326,6 +326,25 @@ CREATE TABLE cleanup_policies (
 );
 
 -- ============================================================
+-- BACKUP SETTINGS (Nexspence extension, spec 37)
+-- ============================================================
+-- Singleton config for scheduled full-instance backups. id is pinned to
+-- 'default' by the CHECK (not a UUID like every other table here) so an
+-- Upsert always has an unambiguous target row.
+CREATE TABLE backup_settings (
+    id              TEXT PRIMARY KEY DEFAULT 'default' CHECK (id = 'default'),
+    enabled         BOOLEAN NOT NULL DEFAULT FALSE,
+    schedule_cron   TEXT NOT NULL DEFAULT '0 3 * * *',
+    blob_store_id   UUID REFERENCES blob_stores(id) ON DELETE SET NULL,
+    retention_count INT NOT NULL DEFAULT 7,
+    last_run_at     TIMESTAMPTZ,
+    last_run_key    TEXT,
+    last_run_error  TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================
 -- SCHEDULED TASKS
 -- ============================================================
 CREATE TABLE scheduled_tasks (
