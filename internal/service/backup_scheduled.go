@@ -172,7 +172,7 @@ func (s *BackupService) applyRetention(ctx context.Context, store storage.BlobSt
 }
 
 // StartScheduler starts the cron entry for the configured schedule and blocks
-// until ctx is cancelled. Run as a goroutine (main.go).
+// until ctx is canceled. Run as a goroutine (main.go).
 func (s *BackupService) StartScheduler(ctx context.Context) {
 	s.sched.mu.Lock()
 	s.sched.cronScheduler = cron.New(cron.WithChain(cron.Recover(cron.DefaultLogger)))
