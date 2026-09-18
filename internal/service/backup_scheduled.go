@@ -136,20 +136,44 @@ func (s *BackupService) RunScheduled(ctx context.Context) (key string, err error
 	if putErr != nil {
 		return "", fmt.Errorf("backup: put %s: %w", key, putErr)
 	}
+	// Every other write path funnels through base.RegisterStoredBlob, which
+	// keeps blob_stores.used_bytes (the DB counter quota checks actually
+	// read, see base/store.go's quotaHeadroom) in sync with what's really in
+	// the store. This path writes straight through store.Put and skips that
+	// entirely, so a multi-GB backup would otherwise never count against its
+	// destination's quota — do the same increment here (#490 review).
+	if err := s.BlobStores.UpdateUsedBytes(ctx, bs.Name, size); err != nil {
+		s.logWarn("backup: update used_bytes failed", "store", bs.Name, "err", err)
+	}
 
-	s.applyRetention(ctx, store, settings.RetentionCount)
+	s.applyRetention(ctx, bs.Name, store, settings.RetentionCount)
 	return key, nil
 }
 
 // applyRetention keeps the retentionCount most recently modified backups/
 // entries in store, deleting older ones. No-op for retentionCount <= 0
 // (unlimited) — an explicit opt-out, not the zero-value default (Get returns
-// 7 when the settings row has never been written).
-func (s *BackupService) applyRetention(ctx context.Context, store storage.BlobStore, retentionCount int) {
+// 7 when the settings row has never been written). storeName is the row name
+// UpdateUsedBytes is keyed by — the same store RunScheduled just resolved bs
+// from.
+func (s *BackupService) applyRetention(ctx context.Context, storeName string, store storage.BlobStore, retentionCount int) {
 	if retentionCount <= 0 {
 		return
 	}
-	entries, err := store.ListEntries(ctx)
+	// A store shared with unrelated product data can hold far more than this
+	// feature's own handful of backups — ask for just the "backups/" prefix
+	// natively when the backend supports it (S3/Azure), instead of paging
+	// through the whole store on every scheduled run just to find our own
+	// entries (#490 review).
+	var (
+		entries []storage.BlobEntry
+		err     error
+	)
+	if pl, ok := store.(storage.PrefixListableStore); ok {
+		entries, err = pl.ListEntriesWithPrefix(ctx, backupKeyPrefix)
+	} else {
+		entries, err = store.ListEntries(ctx)
+	}
 	if err != nil {
 		s.logWarn("backup retention: list entries failed", "err", err)
 		return
@@ -167,6 +191,10 @@ func (s *BackupService) applyRetention(ctx context.Context, store storage.BlobSt
 	for _, e := range backups[retentionCount:] {
 		if err := store.Delete(ctx, e.Key); err != nil {
 			s.logWarn("backup retention: delete failed", "key", e.Key, "err", err)
+			continue
+		}
+		if err := s.BlobStores.UpdateUsedBytes(ctx, storeName, -e.Size); err != nil {
+			s.logWarn("backup retention: update used_bytes failed", "key", e.Key, "err", err)
 		}
 	}
 }
