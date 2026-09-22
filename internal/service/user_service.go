@@ -119,6 +119,9 @@ func (s *UserService) loginLDAP(ctx context.Context, username, password string, 
 	}
 
 	if existing == nil {
+		if err := s.checkLDAPProvisioning(lu.Email); err != nil {
+			return "", nil, err
+		}
 		// Auto-create local record for the LDAP user.
 		existing = &domain.User{
 			Username:  username,
@@ -753,6 +756,30 @@ func (s *UserService) checkSAMLProvisioning(email string) error {
 		return fmt.Errorf("%w: user must be pre-created by an admin", ErrProvisioningRejected)
 	default:
 		return fmt.Errorf("%w: unknown saml provisioning mode %q", ErrInvalidInput, mode)
+	}
+}
+
+// checkLDAPProvisioning gates new-user creation based on ldap.provisioning mode.
+func (s *UserService) checkLDAPProvisioning(email string) error {
+	mode := s.ldapCfg.Provisioning
+	if mode == "" {
+		mode = "jit"
+	}
+	switch mode {
+	case "jit":
+		return nil
+	case "allowlist":
+		for _, pat := range s.ldapCfg.EmailAllowlist {
+			ok, _ := path.Match(strings.ToLower(pat), email)
+			if ok {
+				return nil
+			}
+		}
+		return fmt.Errorf("%w: email %q not in allowlist", ErrProvisioningRejected, email)
+	case "manual":
+		return fmt.Errorf("%w: user must be pre-created by an admin", ErrProvisioningRejected)
+	default:
+		return fmt.Errorf("%w: unknown ldap provisioning mode %q", ErrInvalidInput, mode)
 	}
 }
 

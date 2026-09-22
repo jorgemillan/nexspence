@@ -33,13 +33,10 @@ specific chart version with `--version` (omit it to pull the latest). Browse ver
 Download the `nexspence-run-essentials-vX.Y.Z.zip` from the latest release and extract it:
 **[github.com/nexspence/nexspence/releases](https://github.com/nexspence/nexspence/releases)**
 
-The Helm chart is at `deploy/helm/nexspence/` inside the extracted directory.
-
-```bash
-# Fetch dependencies (bitnami/postgresql sub-chart)
-cd deploy/helm/nexspence
-helm dependency update
-```
+The Helm chart is at `deploy/helm/nexspence/` inside the extracted directory —
+no `helm dependency update` needed, the chart has no chart dependencies (the
+bundled PostgreSQL and Redis are each a small own template on the official
+image, not a sub-chart — see "External PostgreSQL" and "Redis" below).
 
 Then install with exactly one of the networking options below.
 
@@ -99,14 +96,14 @@ helm install nexspence \
 ```
 
 To attach the VirtualService to a Gateway that already exists, set
-`gateway.istio.existingGateway` (`name` or `namespace/name`). The chart then does not create a Gateway. `gatewaySelector` is only the workload labels on a chart-created Gateway (`spec.selector`), not a Gateway CR name.
+`exposure.istioGateway.existingGateway` (`name` or `namespace/name`). The chart then does not create a Gateway. `gatewaySelector` is only the workload labels on a chart-created Gateway (`spec.selector`), not a Gateway CR name.
 ```yaml
-gateway:
-  istio:
-    enabled: true
+exposure:
+  type: istioGateway
+  hosts:
+    - host: nexspence.example.com
+  istioGateway:
     existingGateway: istio-system/istio-ingressgateway
-    hosts:
-      - nexspence.example.com
 ```
 
 See `values-examples/istio-existing-gateway.yaml`.
@@ -128,16 +125,47 @@ helm install nexspence \
 
 ## External PostgreSQL
 
-Disable the bundled bitnami sub-chart and provide your own DSN:
+By default (`database.mode: bundled`) the chart runs its own single-replica
+PostgreSQL StatefulSet on the official `postgres` image — a convenience
+database for quick-start/dev, with no replication, no backups and
+deliberately no PodDisruptionBudget. For production, switch to your own:
 
 ```bash
 helm install nexspence \
   deploy/helm/nexspence \
-  --set postgresql.enabled=false \
-  --set externalDatabase.dsn="postgres://user:pass@pg-host:5432/nexspence" \
+  --set database.mode=external \
+  --set database.external.dsn="postgres://user:pass@pg-host:5432/nexspence" \
   -f deploy/helm/nexspence/values-examples/nginx.yaml \
   --namespace nexspence \
   --create-namespace
+```
+
+Prefer an existing Secret over putting the DSN in values — `database.external.existingSecret`/`existingSecretKey` (default key `dsn`), same convention as every other credential in this chart. The connection pool (`database.maxConns`/`minConns`/`maxIdleSec`) applies either way.
+
+---
+
+## Redis
+
+Backs the distributed lock (cleanup/GC/replication/migration cron
+coordination across replicas) and the login-attempt rate limiter's shared
+state. Not needed for a single replica; required once `replicaCount > 1` or
+`autoscaling.enabled`, or every pod runs its own uncoordinated schedule.
+
+`redis.mode` is `none` by default. `bundled` runs a single-replica Redis on
+the official `redis` image (no persistence — it only backs locks/rate-limit
+counters, not data worth keeping across a restart):
+
+```bash
+helm upgrade --install nexspence deploy/helm/nexspence --set redis.mode=bundled
+```
+
+`external` points at a Redis you already run:
+
+```bash
+helm upgrade --install nexspence deploy/helm/nexspence \
+  --set redis.mode=external \
+  --set redis.addr=redis.example.com:6379 \
+  --set redis.auth.existingSecret=nexspence-redis
 ```
 
 ---
@@ -241,13 +269,13 @@ Two things the chart cannot do for you:
 - **Wildcard DNS.** `*.nexspence.example.com` has to resolve to the ingress.
 - **The `Host` header.** The connector routes on it, so the ingress must pass
   the client's original hostname through rather than rewriting it. Add a
-  wildcard host to `ingress.hosts` (and to the TLS certificate) — with nginx
+  wildcard host to `exposure.hosts` (and to the TLS certificate) — with nginx
   the default `proxy_set_header Host $host` is already right; Traefik and Istio
   preserve it too.
 
 ```yaml
-ingress:
-  enabled: true
+exposure:
+  type: ingress
   hosts:
     - host: nexspence.example.com
       paths: [{ path: /, pathType: Prefix }]
@@ -276,6 +304,41 @@ A YAML map has no environment-variable spelling, so setting any alias makes the
 chart mount a small config file over the image's `/app/config.yaml`. Every other
 setting still arrives as an environment variable, which viper reads last, so
 nothing else in the chart changes behaviour.
+
+---
+
+## LDAP / SAML SSO
+
+Both coexist with local accounts and OIDC. Non-sensitive fields render as
+environment variables; `bindPassword`/`spKeyPem`/`hmacKey` prefer an
+`existingSecret` (same convention as every other credential in this chart).
+
+```bash
+helm upgrade --install nexspence deploy/helm/nexspence \
+  --set ldap.enabled=true \
+  --set ldap.host=ldap.example.com \
+  --set ldap.bindDN="cn=admin,dc=example,dc=com" \
+  --set ldap.bindPasswordExistingSecret=nexspence-ldap \
+  --set ldap.searchBase="dc=example,dc=com"
+```
+
+```bash
+helm upgrade --install nexspence deploy/helm/nexspence \
+  --set saml.enabled=true \
+  --set saml.spEntityId=https://nexspence.example.com \
+  --set saml.acsUrl=https://nexspence.example.com/acs \
+  --set saml.idpMetadataUrl=https://idp.example.com/metadata
+```
+
+`oidc.roleMappings`/`ldap.roleMappings`/`saml.roleMappings` (claim/group name → Nexspence role) are maps, so — like the Docker subdomain connector's `aliases` above — they ride in the same mounted config file rather than an environment variable:
+
+```yaml
+ldap:
+  roleMappings:
+    engineering: nx-write
+```
+
+Full reference for each: `docs/ldap-setup.md`, `docs/saml-setup.md`.
 
 ---
 
@@ -351,11 +414,17 @@ Leaving `config.metricsPublic=false` keeps the token requirement — add an
 
 ---
 
-## Image Scanning (Trivy)
+## Vulnerability Scanning
 
-The nexspence image contains no scanner. Scanning of Docker and OCI *images*
-needs a Trivy binary you supply; package scanning (Maven, npm, PyPI, Cargo)
-uses OSV.dev and needs nothing.
+Two independent scanners:
+
+**Packages** (Maven, npm, PyPI, Cargo) go to OSV.dev over HTTPS and need
+nothing extra — on by default (`scan.enabled: true`), queued on every upload
+plus a nightly full re-scan (`scan.schedule`, default `0 3 * * *`). Turn it
+off with `scan.enabled: false` if you don't want that traffic at all.
+
+**Docker/OCI images** need a Trivy binary, which the nexspence image does not
+ship:
 
 ```yaml
 scanning:
@@ -367,10 +436,30 @@ That adds a `trivy-copy` initContainer which copies the binary out of
 `NEXSPENCE_SCAN_TRIVY_ENABLED` / `NEXSPENCE_SCAN_TRIVY_BIN` for you. Pin the
 Trivy version under `scanning.image.tag`, and size the shared volume with
 `scanning.volumeSize` (default 300Mi — the binary alone is ~150 MB; the
-vulnerability database lands in the existing cache volume).
+vulnerability database lands in the existing cache volume). For an air-gapped
+cluster with no route to the public vulnerability-db mirrors at all, set
+`scanning.skipDbUpdate: true` and point `scanning.dbRepository`/
+`javaDbRepository` at your own mirror.
 
 Check it afterwards: `GET /api/v1/security/scanner` answers `ready` with the
 version, or names what is wrong. Full reference: [docs/scanning.md](../../../docs/scanning.md).
+
+---
+
+## Advanced HTTP settings
+
+Timeouts and body-size limits (`config.readTimeoutSec`/`writeTimeoutSec`,
+default 1800s each; `config.maxBodyMb`, default 1024) rarely need touching —
+raise `maxBodyMb` if you hit "request entity too large" on a large
+Maven/npm/generic upload (Docker/OCI uploads are exempt; see
+`config.docker.maxUploadBytes` instead).
+
+Server-side TLS (`config.tls.enabled`/`certFile`/`keyFile`) is off by
+default — almost every deployment terminates TLS at the ingress/gateway
+instead (see the networking options above). Turn it on only if the app
+itself must present the certificate; mount it first via `extraVolumes`/
+`extraVolumeMounts` and point `certFile`/`keyFile` at the mounted paths, the
+same pattern used for a custom database CA bundle.
 
 ---
 

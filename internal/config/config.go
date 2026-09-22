@@ -237,8 +237,13 @@ type LDAPConfig struct {
 	GroupBase          string          `mapstructure:"group_base"`
 	GroupFilter        string          `mapstructure:"group_filter"`    // {dn} → user DN
 	GroupAttribute     string          `mapstructure:"group_attribute"` // attr holding group name
-	AutoCreateUsers    bool            `mapstructure:"auto_create_users"`
 	TimeoutSec         int             `mapstructure:"timeout_sec"`
+	// Provisioning: jit (default) | allowlist | manual. Same shape and
+	// semantics as OIDC/SAML's own provisioning mode: jit auto-creates a local
+	// record on first successful bind, allowlist requires EmailAllowlist to
+	// match, manual never auto-creates (the account must already exist).
+	Provisioning   string   `mapstructure:"provisioning"`
+	EmailAllowlist []string `mapstructure:"email_allowlist"`
 	// AdminGroup, when set, automatically grants the nx-admin role to any LDAP user
 	// whose group membership includes this group name.
 	AdminGroup string `mapstructure:"admin_group"`
@@ -467,6 +472,17 @@ func ValidateSAML(c SAMLConfig) error {
 	return nil
 }
 
+// ValidateLDAP returns nil when the LDAP config is usable.
+func ValidateLDAP(c LDAPConfig) error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Provisioning == "allowlist" && len(c.EmailAllowlist) == 0 {
+		return fmt.Errorf("ldap.email_allowlist must be non-empty when ldap.provisioning=allowlist")
+	}
+	return nil
+}
+
 // SearchConfig configures the built-in PostgreSQL full-text search.
 type SearchConfig struct {
 	// Full-text search is built into PostgreSQL — no external deps
@@ -650,6 +666,12 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("oidc.admin_group", "")
 	v.SetDefault("oidc.cookie_key", "")
 	v.SetDefault("oidc.public_issuer_url", "")
+	// Same viper caveat as database.dsn/auth.jwt_secret above: an empty-slice
+	// default keeps this reachable from NEXSPENCE_OIDC_EMAIL_ALLOWLIST when no
+	// config file is present (confirmed missing — a Helm/env-only deployment
+	// setting only this var saw it silently discarded, oidc.provisioning=
+	// allowlist rejected every login regardless of the env value).
+	v.SetDefault("oidc.email_allowlist", []string{})
 	v.SetDefault("oidc.scopes", []string{"openid", "profile", "email", "groups"})
 	v.SetDefault("oidc.provisioning", "jit")
 	v.SetDefault("oidc.groups_claim", "groups")
@@ -671,6 +693,24 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("saml.email_attribute", "email")
 	v.SetDefault("saml.username_attribute", "uid")
 	v.SetDefault("saml.name_attribute", "displayName")
+	// Every field below the ones above was missing from this block entirely —
+	// same viper caveat (AutomaticEnv + Unmarshal skips a key absent from
+	// AllKeys): every one of these was silently dropped when set only via its
+	// NEXSPENCE_SAML_* env var with no config file, which is exactly how the
+	// Helm chart (and any other purely-env deployment) configures SAML. That
+	// made SAML unconfigurable end-to-end outside of a mounted config file —
+	// ValidateSAML would still reject a real deployment for "sp_entity_id is
+	// required" even with every env var set.
+	v.SetDefault("saml.admin_group", "")
+	v.SetDefault("saml.email_allowlist", []string{})
+	v.SetDefault("saml.frontend_base_url", "")
+	v.SetDefault("saml.idp_metadata_url", "")
+	v.SetDefault("saml.idp_metadata_xml", "")
+	v.SetDefault("saml.sp_entity_id", "")
+	v.SetDefault("saml.acs_url", "")
+	v.SetDefault("saml.sp_cert_pem", "")
+	v.SetDefault("saml.sp_key_pem", "")
+	v.SetDefault("saml.hmac_key", "")
 	v.SetDefault("ldap.enabled", false)
 	v.SetDefault("ldap.port", 389)
 	v.SetDefault("ldap.search_filter", "(uid={0})")
@@ -678,8 +718,23 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("ldap.user_attributes.first_name", "givenName")
 	v.SetDefault("ldap.user_attributes.last_name", "sn")
 	v.SetDefault("ldap.group_attribute", "cn")
-	v.SetDefault("ldap.auto_create_users", true)
 	v.SetDefault("ldap.timeout_sec", 10)
+	v.SetDefault("ldap.provisioning", "jit")
+	v.SetDefault("ldap.email_allowlist", []string{})
+	// Same gap as SAML above, confirmed the same way: every LDAP field below
+	// was reachable only via a config file, never via its NEXSPENCE_LDAP_* env
+	// var alone — including bind_dn/bind_password/search_base, without which
+	// LDAP cannot authenticate anyone regardless of what the env vars said.
+	v.SetDefault("ldap.host", "")
+	v.SetDefault("ldap.use_tls", false)
+	v.SetDefault("ldap.start_tls", false)
+	v.SetDefault("ldap.insecure_skip_verify", false)
+	v.SetDefault("ldap.bind_dn", "")
+	v.SetDefault("ldap.bind_password", "")
+	v.SetDefault("ldap.search_base", "")
+	v.SetDefault("ldap.group_base", "")
+	v.SetDefault("ldap.group_filter", "")
+	v.SetDefault("ldap.admin_group", "")
 	v.SetDefault("bootstrap.enabled", true)
 	v.SetDefault("bootstrap.admin_username", "admin")
 	v.SetDefault("bootstrap.admin_password", "admin123")
@@ -752,6 +807,9 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	if err := ValidateSAML(cfg.SAML); err != nil {
+		return nil, err
+	}
+	if err := ValidateLDAP(cfg.LDAP); err != nil {
 		return nil, err
 	}
 	if t := cfg.Tracing; t.Enabled {

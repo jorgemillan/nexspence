@@ -1,4 +1,4 @@
-{{- if and .Values.gateway.istio.enabled (not .Values.gateway.istio.existingGateway) -}}
+{{- if and (eq .Values.exposure.type "istioGateway") (not .Values.exposure.istioGateway.existingGateway) -}}
 apiVersion: networking.istio.io/v1beta1
 kind: Gateway
 metadata:
@@ -8,19 +8,21 @@ metadata:
     {{- include "nexspence.labels" . | nindent 4 }}
 spec:
   selector:
-    {{- toYaml .Values.gateway.istio.gatewaySelector | nindent 4 }}
+    {{- toYaml .Values.exposure.istioGateway.gatewaySelector | nindent 4 }}
   servers:
     - port:
-        number: {{ .Values.gateway.istio.port }}
+        number: {{ .Values.exposure.istioGateway.port }}
         name: http
-        protocol: {{ if .Values.gateway.istio.tlsMode }}HTTPS{{ else }}HTTP{{ end }}
+        protocol: {{ if .Values.exposure.istioGateway.tlsMode }}HTTPS{{ else }}HTTP{{ end }}
       hosts:
-        {{- toYaml .Values.gateway.istio.hosts | nindent 8 }}
-      {{- if .Values.gateway.istio.tlsMode }}
+        {{- range .Values.exposure.hosts }}
+        - {{ .host | quote }}
+        {{- end }}
+      {{- if .Values.exposure.istioGateway.tlsMode }}
       tls:
-        mode: {{ .Values.gateway.istio.tlsMode }}
-        {{- if .Values.gateway.istio.tlsSecret }}
-        credentialName: {{ .Values.gateway.istio.tlsSecret }}
+        mode: {{ .Values.exposure.istioGateway.tlsMode }}
+        {{- if .Values.exposure.istioGateway.tlsSecret }}
+        credentialName: {{ .Values.exposure.istioGateway.tlsSecret }}
         {{- end }}
       {{- end }}
 {{- end }}

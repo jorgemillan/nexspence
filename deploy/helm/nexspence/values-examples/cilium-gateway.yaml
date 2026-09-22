@@ -4,18 +4,15 @@
 #   - K8s Gateway API CRDs installed:
 #     kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/standard-install.yaml
 #   - GatewayClass "cilium" must exist (Cilium creates it automatically)
-ingress:
-  enabled: false
-
-gateway:
-  cilium:
-    enabled: true
+exposure:
+  type: ciliumGateway
+  hosts:
+    - host: nexspence.example.com
+      paths:
+        - path: /
+          pathType: PathPrefix
+  ciliumGateway:
     gatewayClassName: "cilium"
-    hosts:
-      - host: nexspence.example.com
-        paths:
-          - path: /
-            pathType: PathPrefix
     tls: []
     gatewayAnnotations:
       cilium.io/lb-ipam-pool: "default"

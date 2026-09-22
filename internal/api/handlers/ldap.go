@@ -23,21 +23,21 @@ func NewLDAPHandler(cfg config.LDAPConfig, ldap auth.LDAPAuthenticator) *LDAPHan
 // GetConfig handles GET /api/v1/ldap/config — returns current LDAP config (password redacted).
 func (h *LDAPHandler) GetConfig(c *gin.Context) {
 	safe := map[string]any{
-		"enabled":         h.cfg.Enabled,
-		"host":            h.cfg.Host,
-		"port":            h.cfg.Port,
-		"useTls":          h.cfg.UseTLS,
-		"startTls":        h.cfg.StartTLS,
-		"bindDn":          h.cfg.BindDN,
-		"bindPassword":    "***",
-		"searchBase":      h.cfg.SearchBase,
-		"searchFilter":    h.cfg.SearchFilter,
-		"userAttributes":  h.cfg.UserAttributes,
-		"groupBase":       h.cfg.GroupBase,
-		"groupFilter":     h.cfg.GroupFilter,
-		"groupAttribute":  h.cfg.GroupAttribute,
-		"autoCreateUsers": h.cfg.AutoCreateUsers,
-		"timeoutSec":      h.cfg.TimeoutSec,
+		"enabled":        h.cfg.Enabled,
+		"host":           h.cfg.Host,
+		"port":           h.cfg.Port,
+		"useTls":         h.cfg.UseTLS,
+		"startTls":       h.cfg.StartTLS,
+		"bindDn":         h.cfg.BindDN,
+		"bindPassword":   "***",
+		"searchBase":     h.cfg.SearchBase,
+		"searchFilter":   h.cfg.SearchFilter,
+		"userAttributes": h.cfg.UserAttributes,
+		"groupBase":      h.cfg.GroupBase,
+		"groupFilter":    h.cfg.GroupFilter,
+		"groupAttribute": h.cfg.GroupAttribute,
+		"provisioning":   h.cfg.Provisioning,
+		"timeoutSec":     h.cfg.TimeoutSec,
 	}
 	c.JSON(http.StatusOK, safe)
 }

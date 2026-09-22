@@ -60,52 +60,51 @@ Service account name.
 {{- end }}
 
 {{/*
-PostgreSQL DSN — either external or bitnami sub-chart.
+PostgreSQL DSN — bundled (own StatefulSet, postgres-statefulset.yaml) or external.
 */}}
 {{- define "nexspence.databaseDSN" -}}
-{{- if .Values.postgresql.enabled }}
-{{- printf "postgres://%s:%s@%s-postgresql:5432/%s?sslmode=disable"
-    .Values.postgresql.auth.username
-    .Values.postgresql.auth.password
-    .Release.Name
-    .Values.postgresql.auth.database }}
+{{- if eq .Values.database.mode "bundled" }}
+{{- printf "postgres://%s:%s@%s-postgres:5432/%s?sslmode=disable"
+    .Values.database.bundled.auth.username
+    .Values.database.bundled.auth.password
+    (include "nexspence.fullname" .)
+    .Values.database.bundled.auth.database }}
 {{- else }}
-{{- .Values.externalDatabase.dsn }}
-{{- end }}
-{{- end }}
-
-{{/*
-Redis mutual-exclusion guard — bundled and external are not both allowed.
-*/}}
-{{- define "nexspence.redisInUse" -}}
-{{- if and .Values.redis.enabled .Values.externalRedis.enabled }}
-{{- fail "only one of redis.enabled / externalRedis.enabled may be true" }}
+{{- .Values.database.external.dsn }}
 {{- end }}
 {{- end }}
 
 {{- define "nexspence.redisAddr" -}}
-{{- include "nexspence.redisInUse" . }}
-{{- if .Values.redis.enabled }}
+{{- if eq .Values.redis.mode "bundled" }}
 {{- printf "%s-redis-master:6379" .Release.Name }}
 {{- else }}
-{{- .Values.externalRedis.addr }}
+{{- .Values.redis.addr }}
 {{- end }}
 {{- end }}
 
 {{- define "nexspence.redisPassword" -}}
-{{- if .Values.redis.enabled }}
 {{- .Values.redis.auth.password }}
-{{- else }}
-{{- .Values.externalRedis.password }}
-{{- end }}
 {{- end }}
 
 {{- define "nexspence.redisDB" -}}
-{{- if .Values.redis.enabled }}
+{{- if eq .Values.redis.mode "bundled" }}
 {{- 0 }}
 {{- else }}
-{{- .Values.externalRedis.db }}
+{{- .Values.redis.db }}
 {{- end }}
+{{- end }}
+
+{{/*
+Whether the mounted /app/config.yaml file is needed at all: a YAML map
+(subdomain-connector aliases, any *.role_mappings) cannot be expressed as an
+environment variable, so it rides in this file instead. Shared between
+configmap.yaml (renders the file) and deployment.yaml (mounts it) so both stay
+in sync on what triggers it.
+*/}}
+{{- define "nexspence.needsConfigFile" -}}
+{{- if or .Values.config.docker.subdomainConnector.aliases .Values.oidc.roleMappings .Values.ldap.roleMappings .Values.saml.roleMappings -}}
+true
+{{- end -}}
 {{- end }}
 
 {{/*

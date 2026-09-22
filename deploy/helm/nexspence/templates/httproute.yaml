@@ -1,4 +1,4 @@
-{{- if .Values.gateway.cilium.enabled -}}
+{{- if eq .Values.exposure.type "ciliumGateway" -}}
 ---
 # K8s Gateway API Gateway (implemented by Cilium GatewayClass)
 apiVersion: gateway.networking.k8s.io/v1
@@ -8,20 +8,20 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "nexspence.labels" . | nindent 4 }}
-  {{- with .Values.gateway.cilium.gatewayAnnotations }}
+  {{- with .Values.exposure.ciliumGateway.gatewayAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  gatewayClassName: {{ .Values.gateway.cilium.gatewayClassName }}
+  gatewayClassName: {{ .Values.exposure.ciliumGateway.gatewayClassName }}
   listeners:
-    {{- if .Values.gateway.cilium.tls }}
+    {{- if .Values.exposure.ciliumGateway.tls }}
     - name: https
       protocol: HTTPS
       port: 443
       tls:
         mode: Terminate
-        {{- with (index .Values.gateway.cilium.tls 0).certificateRefs }}
+        {{- with (index .Values.exposure.ciliumGateway.tls 0).certificateRefs }}
         certificateRefs:
           {{- toYaml . | nindent 10 }}
         {{- end }}
@@ -50,12 +50,12 @@ spec:
     - name: {{ include "nexspence.fullname" . }}-cilium
       namespace: {{ .Release.Namespace }}
   hostnames:
-    {{- range .Values.gateway.cilium.hosts }}
+    {{- range .Values.exposure.hosts }}
     - {{ .host | quote }}
     {{- end }}
   rules:
     - matches:
-        {{- range .Values.gateway.cilium.hosts }}
+        {{- range .Values.exposure.hosts }}
         {{- range .paths }}
         - path:
             type: {{ .pathType }}

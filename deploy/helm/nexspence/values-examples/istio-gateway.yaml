@@ -3,12 +3,11 @@
 #   - Istio installed: istioctl install --set profile=default
 #   - Namespace labeled: kubectl label namespace <ns> istio-injection=enabled
 
-ingress:
-  enabled: false
-
-gateway:
-  istio:
-    enabled: true
+exposure:
+  type: istioGateway
+  hosts:
+    - host: nexspence.example.com
+  istioGateway:
     # Workload labels on the Gateway this file creates (spec.selector).
     # To attach to a Gateway that already exists, use
     # values-examples/istio-existing-gateway.yaml instead.
@@ -18,8 +17,6 @@ gateway:
     tlsMode: "SIMPLE"
     # Secret must be in istio-system namespace (Istio reads certs from there)
     tlsSecret: "nexspence-tls"
-    hosts:
-      - "nexspence.example.com"
     timeout: "300s"
     vsAnnotations: {}
 

@@ -303,6 +303,66 @@ func TestLogin_LDAP_GroupSearchNotConfigured_KeepsExistingRoles(t *testing.T) {
 	assert.Equal(t, []string{"release-manager"}, roleNamesOf(t, roles, u.ID))
 }
 
+// ── ldap.provisioning: previously ldap.auto_create_users existed but was never
+// checked anywhere — loginLDAP always auto-created a new user regardless of
+// its value. Replaced with the same provisioning enum OIDC/SAML already use.
+
+func TestLogin_LDAP_NewUser_Manual_Rejected(t *testing.T) {
+	mock := &mockLDAP{user: &auth.LDAPUser{Username: "nina", Email: "nina@corp.com"}}
+	cfg := config.LDAPConfig{Provisioning: "manual"}
+	svc, users, _ := newUserSvcWithLDAPConfig(mock, cfg)
+
+	_, _, err := svc.Login(context.Background(), "nina", "pass")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, service.ErrProvisioningRejected))
+
+	created, _ := users.Get(context.Background(), "nina")
+	assert.Nil(t, created, "manual provisioning must not auto-create the local user")
+}
+
+func TestLogin_LDAP_NewUser_Allowlist_EmailMatch_Created(t *testing.T) {
+	mock := &mockLDAP{user: &auth.LDAPUser{Username: "oscar", Email: "oscar@company.com"}}
+	cfg := config.LDAPConfig{Provisioning: "allowlist", EmailAllowlist: []string{"*@company.com"}}
+	svc, users, _ := newUserSvcWithLDAPConfig(mock, cfg)
+
+	_, u, err := svc.Login(context.Background(), "oscar", "pass")
+	require.NoError(t, err)
+	assert.Equal(t, "oscar", u.Username)
+
+	created, _ := users.Get(context.Background(), "oscar")
+	require.NotNil(t, created)
+}
+
+func TestLogin_LDAP_NewUser_Allowlist_EmailMiss_Rejected(t *testing.T) {
+	mock := &mockLDAP{user: &auth.LDAPUser{Username: "peggy", Email: "peggy@evil.io"}}
+	cfg := config.LDAPConfig{Provisioning: "allowlist", EmailAllowlist: []string{"*@company.com"}}
+	svc, users, _ := newUserSvcWithLDAPConfig(mock, cfg)
+
+	_, _, err := svc.Login(context.Background(), "peggy", "pass")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, service.ErrProvisioningRejected))
+
+	created, _ := users.Get(context.Background(), "peggy")
+	assert.Nil(t, created)
+}
+
+func TestLogin_LDAP_ExistingUser_ManualMode_StillLogsIn(t *testing.T) {
+	// Provisioning only gates creating a NEW local record — an existing LDAP
+	// user must still be able to log in under manual mode.
+	mock := &mockLDAP{user: &auth.LDAPUser{Username: "quinn", Email: "quinn@corp.com"}}
+	cfg := config.LDAPConfig{Provisioning: "manual"}
+	svc, users, _ := newUserSvcWithLDAPConfig(mock, cfg)
+	existing := &domain.User{
+		Username: "quinn", Email: "quinn@corp.com",
+		Status: domain.UserStatusActive, Source: domain.UserSourceLDAP,
+	}
+	require.NoError(t, users.Create(context.Background(), existing))
+
+	_, u, err := svc.Login(context.Background(), "quinn", "pass")
+	require.NoError(t, err)
+	assert.Equal(t, "quinn", u.Username)
+}
+
 func TestLogin_LDAP_GroupSearchEmptyResult_ReplacesRoles(t *testing.T) {
 	// A successful search returning zero groups is a confirmed answer:
 	// REPLACE semantics still drop the stale role.

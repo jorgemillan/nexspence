@@ -1,0 +1,93 @@
+{{- if eq .Values.database.mode "bundled" }}
+# Bundled PostgreSQL: single replica, no replication, no backups, deliberately
+# no PodDisruptionBudget — a convenience database for quick-start/dev.
+# Production installs should set database.mode=external. Uses the official
+# docker.io/library/postgres image directly instead of a Bitnami sub-chart
+# dependency, same reasoning as the bundled Redis (redis-deployment.yaml):
+# Bitnami moved its maintained image tags behind a paid catalog in 2025.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "nexspence.fullname" . }}-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexspence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  serviceName: {{ include "nexspence.fullname" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nexspence.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        {{- include "nexspence.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: database
+    spec:
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: "{{ .Values.database.bundled.image.repository }}:{{ .Values.database.bundled.image.tag }}"
+          imagePullPolicy: {{ .Values.database.bundled.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.database.bundled.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.database.bundled.auth.password | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.database.bundled.auth.database | quote }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.database.bundled.auth.username | quote }}]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.database.bundled.auth.username | quote }}]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      {{- if not .Values.database.bundled.persistence.enabled }}
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.database.bundled.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.database.bundled.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.database.bundled.persistence.size }}
+  {{- end }}
+{{- end }}

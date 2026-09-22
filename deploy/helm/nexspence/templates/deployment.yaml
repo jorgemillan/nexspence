@@ -91,6 +91,14 @@ spec:
             - name: NEXSPENCE_SCAN_TRIVY_JAVA_DB_REPOSITORY
               value: {{ . | join "," | quote }}
             {{- end }}
+            {{- if .Values.scanning.skipDbUpdate }}
+            - name: NEXSPENCE_SCAN_TRIVY_SKIP_DB_UPDATE
+              value: "true"
+            {{- end }}
+            {{- if .Values.scanning.cacheDir }}
+            - name: NEXSPENCE_SCAN_TRIVY_CACHE_DIR
+              value: {{ .Values.scanning.cacheDir | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.config.jwtSecretExistingSecret }}
             - name: NEXSPENCE_AUTH_JWT_SECRET
@@ -111,12 +119,12 @@ spec:
                   name: {{ .Values.config.adminExistingSecret }}
                   key: {{ .Values.config.adminExistingSecretPasswordKey | default "admin-password" }}
             {{- end }}
-            {{- if and (not .Values.postgresql.enabled) .Values.externalDatabase.existingSecret }}
+            {{- if and (eq .Values.database.mode "external") .Values.database.external.existingSecret }}
             - name: NEXSPENCE_DATABASE_DSN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.externalDatabase.existingSecret }}
-                  key: {{ .Values.externalDatabase.existingSecretKey | default "dsn" }}
+                  name: {{ .Values.database.external.existingSecret }}
+                  key: {{ .Values.database.external.existingSecretKey | default "dsn" }}
             {{- end }}
             {{- if and (eq .Values.storage.type "s3") .Values.storage.s3.existingSecret }}
             - name: NEXSPENCE_STORAGE_S3_ACCESS_KEY_ID
@@ -155,18 +163,12 @@ spec:
                   key: {{ .Values.storage.azure.existingSecretKey | default "account-key" }}
             {{- end }}
             {{- end }}
-            {{- if and .Values.redis.enabled .Values.redis.auth.existingSecret }}
+            {{- if and (ne .Values.redis.mode "none") .Values.redis.auth.existingSecret }}
             - name: NEXSPENCE_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.redis.auth.existingSecret }}
                   key: {{ .Values.redis.auth.existingSecretKey | default "password" }}
-            {{- else if and .Values.externalRedis.enabled .Values.externalRedis.existingSecret }}
-            - name: NEXSPENCE_REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.externalRedis.existingSecret }}
-                  key: {{ .Values.externalRedis.existingSecretKey | default "password" }}
             {{- end }}
             {{- if and .Values.oidc.enabled .Values.oidc.clientSecretExistingSecret }}
             - name: NEXSPENCE_OIDC_CLIENT_SECRET
@@ -181,6 +183,43 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.oidc.cookieKeyExistingSecret }}
                   key: {{ .Values.oidc.cookieKeyExistingSecretKey | default "oidc-cookie-key" }}
+            {{- end }}
+            {{- if .Values.config.encryptionKeyExistingSecret }}
+            - name: NEXSPENCE_AUTH_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.encryptionKeyExistingSecret }}
+                  key: {{ .Values.config.encryptionKeyExistingSecretKey | default "encryption-key" }}
+            {{- end }}
+            {{- if and .Values.proxy.username .Values.proxy.passwordExistingSecret }}
+            - name: NEXSPENCE_PROXY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.proxy.passwordExistingSecret }}
+                  key: {{ .Values.proxy.passwordExistingSecretKey | default "password" }}
+            {{- end }}
+            {{- if and .Values.ldap.enabled .Values.ldap.bindPasswordExistingSecret }}
+            - name: NEXSPENCE_LDAP_BIND_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.ldap.bindPasswordExistingSecret }}
+                  key: {{ .Values.ldap.bindPasswordExistingSecretKey | default "bind-password" }}
+            {{- end }}
+            {{- if .Values.saml.enabled }}
+            {{- if .Values.saml.spKeyPemExistingSecret }}
+            - name: NEXSPENCE_SAML_SP_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.saml.spKeyPemExistingSecret }}
+                  key: {{ .Values.saml.spKeyPemExistingSecretKey | default "sp-key-pem" }}
+            {{- end }}
+            {{- if .Values.saml.hmacKeyExistingSecret }}
+            - name: NEXSPENCE_SAML_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.saml.hmacKeyExistingSecret }}
+                  key: {{ .Values.saml.hmacKeyExistingSecretKey | default "hmac-key" }}
+            {{- end }}
             {{- end }}
             {{- if and .Values.oidc.enabled .Values.oidc.googleAdminSDK.enabled }}
             - name: NEXSPENCE_OIDC_GOOGLE_ADMIN_SDK_SERVICE_ACCOUNT_KEY
@@ -217,7 +256,7 @@ spec:
               mountPath: /opt/trivy
               readOnly: true
             {{- end }}
-            {{- if .Values.config.docker.subdomainConnector.aliases }}
+            {{- if include "nexspence.needsConfigFile" . }}
             - name: config-file
               mountPath: /app/config.yaml
               subPath: config.yaml
@@ -233,7 +272,7 @@ spec:
           emptyDir: {}
         - name: cache
           emptyDir: {}
-        {{- if .Values.config.docker.subdomainConnector.aliases }}
+        {{- if include "nexspence.needsConfigFile" . }}
         - name: config-file
           configMap:
             name: {{ include "nexspence.fullname" . }}-file

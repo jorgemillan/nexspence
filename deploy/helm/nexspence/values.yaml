@@ -41,8 +41,14 @@ securityContext:
 config:
   # -- External URL (used in download links, Docker subdomain connector)
   baseURL: "http://nexspence.example.com"
+  # -- debug | info | warn | error
   logLevel: "info"
+  # -- json | text ("text" is human-readable, meant for a local terminal, not
+  # for a container's stdout — most log shippers expect json)
   logFormat: "json"
+  # -- Address+port the server listens on inside the container. Changing the
+  # port here also moves the container port, both probes and the Service —
+  # see nexspence.httpPort in _helpers.tpl.
   httpAddr: ":8081"
   # -- Peers (IPs or CIDRs) allowed to set X-Forwarded-For. Every chart
   # deployment sits behind an ingress/gateway, so leaving this empty (the
@@ -51,6 +57,26 @@ config:
   # pod CIDR, or "*" to trust every hop (only safe when the server is
   # unreachable except through a proxy you control).
   trustedProxies: []
+  # -- Origins allowed to make cross-origin requests to the API (empty = none).
+  corsOrigins: []
+  # -- Overrides the served Content-Security-Policy. Empty uses the built-in
+  # policy; the literal "off" omits the header, for a reverse proxy that sets
+  # its own.
+  csp: ""
+  readTimeoutSec: 1800
+  writeTimeoutSec: 1800
+  # -- Caps request bodies for everything EXCEPT Docker/OCI uploads, which
+  # bypass this and use config.docker.maxUploadBytes instead. Raise this for
+  # large Maven/npm/generic/raw uploads or bulk imports.
+  maxBodyMb: 1024
+  # -- Server-side TLS. Off by default — most deployments terminate TLS at
+  # the ingress/gateway (see exposure below) instead. certFile/keyFile must
+  # point at paths mounted via extraVolumes/extraVolumeMounts; the chart
+  # does not manage the certificate itself.
+  tls:
+    enabled: false
+    certFile: ""
+    keyFile: ""
   # -- Internal CIDRs the SSRF guard may reach (proxy remotes, webhooks,
   # replication, Nexus migration). Empty refuses every private/loopback
   # address. Emitted as NEXSPENCE_OUTBOUND_ALLOWED_INTERNAL_CIDRS (comma-separated).
@@ -68,6 +94,9 @@ config:
   # in production once you have set a unique adminPassword. The JWT secret is no
   # longer a shipped default (it is auto-generated when jwtSecret is empty).
   allowInsecureDefaults: true
+  # -- How long a login session's JWT stays valid before the user must sign in
+  # again. Does not affect API tokens (Security > API Tokens), which have
+  # their own expiry set per-token.
   jwtExpiryHours: 8
   # -- Create/repair the bootstrap admin on every start. Set to false once real
   # accounts exist, so the admin credentials below can be dropped from values
@@ -87,6 +116,37 @@ config:
   # the cluster network reaches the Service and a scrape token would just be one
   # more secret to rotate.
   metricsPublic: false
+  # -- Allow read access without logging in, for repositories that opt into
+  # anonymous access.
+  anonymousEnabled: true
+  # -- Minimum length enforced on every new/changed local-account password.
+  passwordMinLength: 8
+  # -- bcrypt work factor for local-account password hashes. Higher is slower
+  # (more CPU per login) and more resistant to offline cracking if the
+  # password-hash column is ever leaked. 12 is bcrypt's own recommended
+  # default; only raise it if you have CPU to spare and a specific reason to.
+  bcryptCost: 12
+  # -- Maximum lifetime an operator can set on a new API token (Security > API
+  # Tokens) — a hard ceiling, not a default; individual tokens can still ask
+  # for less.
+  tokenMaxDays: 90
+  # -- General per-user (or per-IP when anonymous) API request throttle —
+  # every request, not just login. Always enforced independently per replica:
+  # it is a plain in-memory token bucket, never coordinated through Redis
+  # (unlike the separate failed-login-attempt guard, which is Redis-backed
+  # when redis.mode is not "none" but has its own fixed policy, not
+  # configurable here).
+  rateLimitEnabled: true
+  # -- Sustained requests allowed per second per identity (token-bucket refill rate).
+  rateLimitRps: 50
+  # -- Burst capacity above rateLimitRps before further requests are throttled.
+  rateLimitBurst: 100
+  # -- Dedicated key (base64, 32 bytes) for sealing replication credentials.
+  # Empty derives it from jwtSecret instead (legacy, still supported) — set
+  # this explicitly for HA/DR so a JWT-secret rotation doesn't also break
+  # decrypting already-stored replication credentials.
+  encryptionKeyExistingSecret: ""
+  encryptionKeyExistingSecretKey: "encryption-key"
   # -- Docker subdomain connector: serve each Docker repository on its own
   # hostname, so clients can `docker pull myrepo.example.com/alpine` instead of
   # `docker pull nexspence.example.com:8081/repository/myrepo/alpine`. Needs a
@@ -106,6 +166,70 @@ config:
       #   aliases:
       #     docker-hub-proxy.example.com: dockerhub-proxy
       aliases: {}
+    # -- Caps a single staged blob upload (image layers bypass http.max_body_mb
+    # entirely, so this is their only bound). 0 disables the cap.
+    maxUploadBytes: 10737418240 # 10 GiB
+
+# -- Server-wide outbound proxy for proxy-repository upstream fetches. Empty
+# (default) honors the standard HTTP_PROXY/HTTPS_PROXY/NO_PROXY env vars
+# instead. Per-repository proxy_config overrides these.
+proxy:
+  httpProxy: ""
+  httpsProxy: ""
+  socks5Proxy: ""
+  noProxy: ""
+  username: ""
+  # -- Prefer passwordExistingSecret below — a plaintext value here tends to
+  # end up committed to a values file.
+  # password: ""
+  passwordExistingSecret: ""
+  passwordExistingSecretKey: "password"
+
+# -- Blob garbage collection: reclaims disk/S3/Azure space from blobs no
+# repository references any more (left behind by deletes, failed uploads,
+# promotions). Coordinated across replicas via redis.mode when set.
+gc:
+  enabled: true
+  # -- Standard 5-field cron expression (minute hour day month weekday).
+  # Default: every Sunday at 03:00.
+  schedule: "0 3 * * 0"
+  # -- Safety window: a blob younger than this is never collected, even if
+  # nothing references it yet — protects an upload that is mid-flight or not
+  # yet linked to its component row. Go duration syntax ("24h", "30m").
+  minAge: "24h"
+
+# -- Audit-log (Security > Audit Log) retention and storage.
+audit:
+  # -- Entries older than this are dropped by the nightly rotation job.
+  retentionDays: 90
+  # -- Above this many total rows, the rotator logs a warning (and the
+  # `audit_events` count metric reflects it) — an early-warning threshold, not
+  # an enforcement limit; it does not delete anything or reject writes.
+  softCap: 1000000
+  # -- How often the rotation/partition-maintenance job runs. Go duration syntax.
+  rotationInterval: "24h"
+  # -- How many months ahead the job pre-creates empty partitions for, so a
+  # write never lands on a month whose partition doesn't exist yet.
+  lookaheadMonths: 2
+
+# -- Vulnerability scanning of Maven/npm/PyPI/Cargo packages against OSV.dev,
+# on upload and on a nightly schedule. Independent of image scanning
+# (scanning.* below, which is Trivy-specific and needs a Trivy binary).
+scan:
+  enabled: true
+  schedule: "0 3 * * *"
+
+cleanup:
+  # -- Default cron schedule (5-field) for a cleanup policy that doesn't set
+  # its own. Default: every 6 hours.
+  defaultSchedule: "0 */6 * * *"
+
+search:
+  # -- NOTE: confirmed unused by the current code (internal/config/config.go's
+  # own SearchConfig.MinQueryLen is never read anywhere else in the codebase)
+  # — setting this has no effect today. Left in values.yaml only because the
+  # app config key exists; see UPSTREAM_ISSUES.md.
+  minQueryLen: 2
 
 # -- OIDC single sign-on. Every field below is sensitive (issuer/redirect_url/
 # admin_group name real internal infrastructure and access-control policy) and
@@ -126,10 +250,28 @@ oidc:
   clientSecretExistingSecretKey: "client-secret"
   redirectUrl: ""
   frontendBaseUrl: ""
+  # -- OAuth2 scopes requested from the IdP. "groups" is needed for
+  # adminGroup/roleMappings to see anything at all — some IdPs (notably
+  # Google) never populate a groups claim regardless of scope; see
+  # googleAdminSDK below for that case.
   scopes: ["openid", "profile", "email", "groups"]
-  provisioning: "auto"
+  # -- jit (default, matches the app's own default) | allowlist | manual.
+  # "auto" was never a value the app recognizes (internal/service/user_service.go
+  # only matches jit/allowlist/manual) — every first OIDC login of a new user
+  # failed with "unknown provisioning mode" until this was overridden by hand.
+  provisioning: "jit"
   groupsClaim: "groups"
   adminGroup: ""
+  # -- Claim value (or literal role name) → Nexspence role. Same shape as
+  # ldap.roleMappings/saml.roleMappings; rendered into the mounted config file
+  # alongside the aliases below, since a map cannot be an environment variable.
+  roleMappings: {}
+  # -- Glob patterns (path.Match), required when provisioning=allowlist. Empty
+  # here means every login is rejected under that mode — the chart intentionally
+  # fails the render rather than repeat the provisioning="auto" mistake above.
+  emailAllowlist: []
+  # -- Login button text ("Sign in with {displayName}")
+  displayName: "SSO"
   usernameClaim: "preferred_username"
   emailClaim: "email"
   nameClaim: "name"
@@ -156,12 +298,95 @@ oidc:
   cookieKeyExistingSecret: ""
   cookieKeyExistingSecretKey: "oidc-cookie-key"
 
+# -- LDAP / Active Directory authentication. Coexists with local, OIDC and SAML.
+ldap:
+  enabled: false
+  host: ""
+  port: 389
+  useTLS: false   # LDAPS (port 636)
+  startTLS: false # STARTTLS on a plain connection
+  insecureSkipVerify: false
+  bindDN: ""
+  # -- Prefer bindPasswordExistingSecret below — a plaintext value here tends
+  # to end up committed to a values file.
+  # bindPassword: ""
+  bindPasswordExistingSecret: ""
+  bindPasswordExistingSecretKey: "bind-password"
+  searchBase: ""
+  searchFilter: "(uid={0})" # {0} -> username
+  userAttributes:
+    email: "mail"
+    firstName: "givenName"
+    lastName: "sn"
+  groupBase: ""
+  groupFilter: "" # {dn} -> user DN
+  groupAttribute: "cn"
+  timeoutSec: 10
+  # -- jit (default, matches the app's own default) | allowlist | manual. Same
+  # enum as oidc.provisioning/saml.provisioning — previously this was a plain
+  # autoCreateUsers boolean that the app never actually checked (loginLDAP
+  # always auto-created a new user regardless of its value).
+  provisioning: "jit"
+  # -- Glob patterns (path.Match), required when provisioning=allowlist.
+  emailAllowlist: []
+  # -- Automatically grants nx-admin to any LDAP user in this group.
+  adminGroup: ""
+  # -- LDAP group name -> Nexspence role. Rendered into the mounted config
+  # file alongside oidc.roleMappings / saml.roleMappings and the Docker
+  # subdomain aliases (a map cannot be an environment variable).
+  roleMappings: {}
+
+# -- SAML 2.0 SP-initiated SSO. Coexists with local, LDAP and OIDC.
+saml:
+  enabled: false
+  displayName: "SAML SSO"
+  showLoginButton: true
+  frontendBaseUrl: ""
+  # -- Exactly one of these two is required when enabled=true. idpMetadataUrl
+  # is fetched live from the IdP at startup (simplest, but startup then
+  # depends on network access to the IdP); idpMetadataXml is the same
+  # document pasted in statically (works air-gapped, but you must update it
+  # by hand if the IdP ever rotates its signing certificate).
+  idpMetadataUrl: ""
+  idpMetadataXml: ""
+  spEntityId: ""
+  acsUrl: ""
+  # -- SP signing key pair. Leave both empty for an ephemeral RSA-2048 pair
+  # generated at startup (fine for a single replica; a multi-replica
+  # deployment needs a fixed pair so every pod validates the same signatures).
+  spCertPem: ""
+  spKeyPemExistingSecret: ""
+  spKeyPemExistingSecretKey: "sp-key-pem"
+  # -- jit (default) | allowlist | manual.
+  provisioning: "jit"
+  emailAllowlist: []
+  groupsAttribute: "groups"
+  emailAttribute: "email"
+  usernameAttribute: "uid"
+  nameAttribute: "displayName"
+  adminGroup: ""
+  # -- SAML group name -> Nexspence role. Same mounted-file mechanism as
+  # ldap.roleMappings / oidc.roleMappings.
+  roleMappings: {}
+  # -- Signs RelayState (base64, 32 bytes). Leave empty to auto-generate; set
+  # explicitly only if you need it stable across a full chart uninstall/reinstall.
+  hmacKeyExistingSecret: ""
+  hmacKeyExistingSecretKey: "hmac-key"
+
 # -- Redis: backs the distributed lock (cleanup/GC/replication/migration cron
 # coordination across replicas) and the login-attempt rate limiter's shared
 # state. Required once replicaCount > 1 / autoscaling.enabled, or every pod
 # runs its own uncoordinated schedule and rate limiting stops being global.
 redis:
-  enabled: false
+  # -- none (default) | bundled (own Deployment, official docker.io/library/redis
+  # image, no persistence — see redis-deployment.yaml) | external (bring your own).
+  mode: none
+  # -- Only used when mode=external.
+  addr: ""
+  # -- Redis logical database index (SELECT n). Only used when mode=external —
+  # irrelevant for mode=bundled, which always uses db 0 (a fresh, dedicated
+  # Redis with nothing else in it).
+  db: 0
   auth:
     # -- Prefer existingSecret below — a plaintext value here tends to end up
     # committed to a values file. Uncomment only if you genuinely have no
@@ -170,20 +395,6 @@ redis:
     # -- Reference an existing Secret instead of putting the password in values.
     existingSecret: ""
     existingSecretKey: "password"
-
-# -- External Redis (used when redis.enabled=false and you still want the
-# distributed-lock/rate-limiter coordination above)
-externalRedis:
-  enabled: false
-  addr: ""
-  # -- Prefer existingSecret below — a plaintext value here tends to end up
-  # committed to a values file. Uncomment only if you genuinely have no
-  # existing Secret to point at.
-  # password: ""
-  # -- Reference an existing Secret instead of putting the password in values.
-  existingSecret: ""
-  existingSecretKey: "password"
-  db: 0
 
 # -- Blob storage: "local", "s3" or "azure"
 storage:
@@ -268,24 +479,30 @@ service:
   targetPort: http
   annotations: {}
 
-# ── Ingress (nginx / traefik / cilium ingress-controller) ──────────────
-# Exactly ONE of ingress or gateway should be enabled at a time.
-ingress:
-  enabled: false
-  # -- IngressClass name: "nginx" | "traefik" | "cilium"
-  className: "nginx"
-  annotations: {}
+# ── How the Service is exposed outside the cluster ─────────────────────
+# Exactly one type at a time: none (default, use kubectl port-forward or your
+# own external LoadBalancer/route) | ingress (nginx/traefik/cilium ingress
+# controller) | istioGateway | ciliumGateway (K8s Gateway API). `hosts`/`tls`
+# are shared by every type; each type's own block holds only what's specific
+# to it.
+exposure:
+  type: none
+  # -- Shared by every type below (istioGateway/ciliumGateway only read
+  # `.host` off each entry; `.paths` is ingress/ciliumGateway only).
   hosts:
     - host: nexspence.example.com
       paths:
         - path: /
           pathType: Prefix
-  tls: []
 
-# ── API Gateway: Istio ─────────────────────────────────────────────────
-gateway:
-  istio:
-    enabled: false
+  ingress:
+    # -- IngressClass name: "nginx" | "traefik" | "cilium"
+    className: "nginx"
+    annotations: {}
+    # -- Standard Ingress TLS entries: [{secretName, hosts}].
+    tls: []
+
+  istioGateway:
     # -- Labels for Gateway.spec.selector (workload), not a Gateway CR name.
     gatewaySelector:
       istio: ingressgateway
@@ -297,26 +514,19 @@ gateway:
     tlsMode: ""
     # -- Secret name for TLS (required when tlsMode=SIMPLE)
     tlsSecret: ""
-    hosts:
-      - "nexspence.example.com"
     # -- Extra annotations on the VirtualService
     vsAnnotations: {}
     # -- Timeout for VirtualService routes
     timeout: "300s"
 
-  # ── API Gateway: Cilium (K8s Gateway API) ─────────────────────────────
-  cilium:
-    enabled: false
+  ciliumGateway:
     # -- Gateway API GatewayClass name (cilium registers "cilium")
     gatewayClassName: "cilium"
-    hosts:
-      - host: nexspence.example.com
-        paths:
-          - path: /
-            pathType: PathPrefix
-    tls: []
     # -- Extra annotations on the Gateway resource
     gatewayAnnotations: {}
+    # -- Gateway API certificateRefs: [{name, kind: Secret}]. Non-empty switches
+    # the listener to HTTPS.
+    tls: []
 
 # ── Horizontal Pod Autoscaler ─────────────────────────────────────────
 autoscaling:
@@ -365,37 +575,51 @@ affinity: {}
 extraVolumes: []
 extraVolumeMounts: []
 
-# ── PostgreSQL sub-chart (bitnami) ────────────────────────────────────
-# Set enabled: false and provide externalDatabase.dsn for external Postgres.
-postgresql:
-  enabled: true
-  # Bitnami removed the legacy `docker.io/bitnami/*` image tags from Docker Hub
-  # in 2025 (moved to the paid `bitnamisecure` catalog); the archived copies
-  # live under `bitnamilegacy/*`. Pin the bundled subchart image there so a
-  # default install does not hit ImagePullBackOff. Override or run an external
-  # database (postgresql.enabled=false) for production.
-  image:
-    repository: bitnamilegacy/postgresql
-  auth:
-    username: nexspence
-    password: nexspence
-    database: nexspence
-  primary:
+# ── PostgreSQL ──────────────────────────────────────────────────────────
+database:
+  # -- bundled (default, own StatefulSet, quick-start/dev) | external (bring
+  # your own — recommended for production).
+  mode: bundled
+  # -- Connection pool, applies either way.
+  maxConns: 100
+  minConns: 5
+  maxIdleSec: 300
+
+  # -- Only used when mode=bundled. A convenience database: single replica, no
+  # replication, no backups, deliberately no PodDisruptionBudget — see
+  # postgres-statefulset.yaml. Uses the official docker.io/library/postgres
+  # image directly, same reasoning as the bundled Redis (redis-deployment.yaml):
+  # Bitnami moved its maintained image tags behind a paid catalog in 2025, so a
+  # sub-chart dependency on bitnami/postgresql would only reintroduce that
+  # problem here.
+  bundled:
+    image:
+      repository: docker.io/library/postgres
+      tag: "18"
+      pullPolicy: IfNotPresent
+    auth:
+      username: nexspence
+      password: nexspence
+      database: nexspence
     persistence:
+      # -- false uses an emptyDir instead of a PVC — data is lost on every pod
+      # restart. Only sensible for a throwaway/CI instance.
       enabled: true
       size: 10Gi
+      # -- Empty uses the cluster's default StorageClass.
+      storageClass: ""
 
-# -- External PostgreSQL DSN (used when postgresql.enabled=false)
-externalDatabase:
-  # -- Prefer existingSecret below — a plaintext value here (password
-  # included) tends to end up committed to a values file. Uncomment only if
-  # you genuinely have no existing Secret to point at.
-  # dsn: "postgres://nexspence:nexspence@external-postgres:5432/nexspence?sslmode=disable"
-  # -- Reference an existing Secret instead of putting the DSN directly in
-  # values. When set, the chart never composes NEXSPENCE_DATABASE_DSN itself —
-  # the Deployment reads it straight from this Secret via secretKeyRef.
-  existingSecret: ""
-  existingSecretKey: "dsn"
+  # -- Only used when mode=external.
+  external:
+    # -- Prefer existingSecret below — a plaintext value here (password
+    # included) tends to end up committed to a values file. Uncomment only if
+    # you genuinely have no existing Secret to point at.
+    # dsn: "postgres://nexspence:nexspence@external-postgres:5432/nexspence?sslmode=disable"
+    # -- Reference an existing Secret instead of putting the DSN directly in
+    # values. When set, the chart never composes NEXSPENCE_DATABASE_DSN itself —
+    # the Deployment reads it straight from this Secret via secretKeyRef.
+    existingSecret: ""
+    existingSecretKey: "dsn"
 
 # Image scanning (Trivy).
 #
@@ -424,3 +648,8 @@ scanning:
   # -- OCI refs for trivy-java-db. Empty = Trivy default.
   javaDbRepository: []
   #   - ghcr-proxy.example.com/aquasecurity/trivy-java-db:1
+  # -- Skip Trivy's own DB update check (air-gapped clusters with no route to
+  # the internet at all, relying only on dbRepository/javaDbRepository above).
+  skipDbUpdate: false
+  # -- Empty uses Trivy's own default cache location.
+  cacheDir: ""

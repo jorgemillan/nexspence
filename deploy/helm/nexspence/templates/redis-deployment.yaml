@@ -1,0 +1,99 @@
+{{- if eq .Values.redis.mode "bundled" }}
+# redis.enabled renders NEXSPENCE_REDIS_ADDR pointing at "{release}-redis-master"
+# (nexspence.redisAddr, _helpers.tpl) but nothing ever created that Service —
+# Chart.yaml declares no Redis dependency at all (only postgresql). Enabling
+# the option left the app trying to reach a host that does not exist. This is
+# a minimal Deployment+Service using the official docker.io/library/redis
+# image (not a Bitnami chart dependency, for the same reason PR upstream #415
+# replaced the bundled-Postgres Bitnami sub-chart with its own StatefulSet on
+# the official postgres image: Bitnami moved its maintained tags behind a paid
+# catalog in 2025). No PVC: this Redis only backs distlock coordination and
+# the login rate limiter's shared state, not data an operator needs to keep —
+# losing it on a pod restart just releases any held locks and resets counters,
+# same as scaling externalRedis down and back up.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nexspence.fullname" . }}-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexspence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "nexspence.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        {{- include "nexspence.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: redis
+          image: "docker.io/library/redis:7-alpine"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            {{- if .Values.redis.auth.existingSecret }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.redis.auth.existingSecret }}
+                  key: {{ .Values.redis.auth.existingSecretKey | default "password" }}
+            {{- else }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "nexspence.fullname" . }}
+                  key: NEXSPENCE_REDIS_PASSWORD
+            {{- end }}
+          # --save "" --appendonly no: no persistence by design (see note above).
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

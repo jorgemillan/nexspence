@@ -1,0 +1,22 @@
+{{- if eq .Values.redis.mode "bundled" }}
+# Name fixed to match nexspence.redisAddr (_helpers.tpl), which already
+# assumed this Service existed under this exact name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-redis-master
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexspence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: redis
+      protocol: TCP
+      name: redis
+  selector:
+    {{- include "nexspence.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+{{- end }}

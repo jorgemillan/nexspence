@@ -1,12 +1,12 @@
 Nexspence has been deployed!
 
 1. Get the application URL:
-{{- if .Values.ingress.enabled }}
-  http{{ if .Values.ingress.tls }}s{{ end }}://{{ (index .Values.ingress.hosts 0).host }}
-{{- else if .Values.gateway.istio.enabled }}
+{{- if eq .Values.exposure.type "ingress" }}
+  http{{ if .Values.exposure.ingress.tls }}s{{ end }}://{{ (index .Values.exposure.hosts 0).host }}
+{{- else if eq .Values.exposure.type "istioGateway" }}
   Check the Istio Gateway external IP:
   kubectl get svc -n istio-system istio-ingressgateway
-{{- else if .Values.gateway.cilium.enabled }}
+{{- else if eq .Values.exposure.type "ciliumGateway" }}
   Check the cilium Gateway external IP:
   kubectl get gateway {{ include "nexspence.fullname" . }}-cilium -n {{ .Release.Namespace }}
 {{- else }}

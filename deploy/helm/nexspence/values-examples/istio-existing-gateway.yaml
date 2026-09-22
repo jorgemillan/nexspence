@@ -4,15 +4,12 @@
 # helm install nexspence deploy/helm/nexspence \
 #   -f values-examples/istio-existing-gateway.yaml
 
-ingress:
-  enabled: false
-
-gateway:
-  istio:
-    enabled: true
+exposure:
+  type: istioGateway
+  hosts:
+    - host: nexspence.example.com
+  istioGateway:
     existingGateway: istio-system/istio-ingressgateway
-    hosts:
-      - "nexspence.example.com"
     timeout: "300s"
 
 config:

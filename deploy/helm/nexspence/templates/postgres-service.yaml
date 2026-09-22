@@ -1,0 +1,23 @@
+{{- if eq .Values.database.mode "bundled" }}
+# Headless (clusterIP: None): required as the StatefulSet's governing Service,
+# and doubles as the DSN host (nexspence.databaseDSN, _helpers.tpl) — with a
+# single replica, "<name>.<namespace>.svc" always resolves to pod-0.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nexspence.fullname" . }}-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nexspence.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  clusterIP: None
+  ports:
+    - port: 5432
+      targetPort: postgres
+      protocol: TCP
+      name: postgres
+  selector:
+    {{- include "nexspence.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+{{- end }}

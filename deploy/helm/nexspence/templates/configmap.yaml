@@ -17,6 +17,20 @@ data:
   # []string env override on "," (config_test.go:TestLoad_TrustedProxies_EnvOverride).
   NEXSPENCE_HTTP_TRUSTED_PROXIES: {{ .Values.config.trustedProxies | join "," | quote }}
   {{- end }}
+  {{- with .Values.config.corsOrigins }}
+  NEXSPENCE_HTTP_CORS_ORIGINS: {{ . | join "," | quote }}
+  {{- end }}
+  {{- if .Values.config.csp }}
+  NEXSPENCE_HTTP_CSP: {{ .Values.config.csp | quote }}
+  {{- end }}
+  NEXSPENCE_HTTP_READ_TIMEOUT_SEC: {{ .Values.config.readTimeoutSec | quote }}
+  NEXSPENCE_HTTP_WRITE_TIMEOUT_SEC: {{ .Values.config.writeTimeoutSec | quote }}
+  NEXSPENCE_HTTP_MAX_BODY_MB: {{ .Values.config.maxBodyMb | quote }}
+  {{- if .Values.config.tls.enabled }}
+  NEXSPENCE_HTTP_TLS_ENABLED: "true"
+  NEXSPENCE_HTTP_TLS_CERT_FILE: {{ required "config.tls.certFile is required when config.tls.enabled=true" .Values.config.tls.certFile | quote }}
+  NEXSPENCE_HTTP_TLS_KEY_FILE: {{ required "config.tls.keyFile is required when config.tls.enabled=true" .Values.config.tls.keyFile | quote }}
+  {{- end }}
   {{- with .Values.config.outbound }}
   {{- if .allowedInternalCidrs }}
   NEXSPENCE_OUTBOUND_ALLOWED_INTERNAL_CIDRS: {{ .allowedInternalCidrs | join "," | quote }}
@@ -35,8 +49,47 @@ data:
   NEXSPENCE_BOOTSTRAP_ADMIN_FIRST_NAME: {{ .Values.config.adminFirstName | quote }}
   {{- end }}
   NEXSPENCE_METRICS_PUBLIC: {{ .Values.config.metricsPublic | quote }}
+  NEXSPENCE_AUTH_ANONYMOUS_ENABLED: {{ .Values.config.anonymousEnabled | quote }}
+  NEXSPENCE_AUTH_PASSWORD_MIN_LENGTH: {{ .Values.config.passwordMinLength | quote }}
+  NEXSPENCE_AUTH_BCRYPT_COST: {{ .Values.config.bcryptCost | quote }}
+  NEXSPENCE_AUTH_TOKEN_MAX_DAYS: {{ .Values.config.tokenMaxDays | quote }}
+  NEXSPENCE_AUTH_RATE_LIMIT_ENABLED: {{ .Values.config.rateLimitEnabled | quote }}
+  NEXSPENCE_AUTH_RATE_LIMIT_RPS: {{ .Values.config.rateLimitRps | quote }}
+  NEXSPENCE_AUTH_RATE_LIMIT_BURST: {{ .Values.config.rateLimitBurst | quote }}
   NEXSPENCE_DOCKER_SUBDOMAIN_CONNECTOR_ENABLED: {{ .Values.config.docker.subdomainConnector.enabled | quote }}
   NEXSPENCE_DOCKER_SUBDOMAIN_CONNECTOR_BASE_DOMAIN: {{ .Values.config.docker.subdomainConnector.baseDomain | quote }}
+  NEXSPENCE_DOCKER_MAX_UPLOAD_BYTES: {{ .Values.config.docker.maxUploadBytes | int64 | quote }}
+  {{- with .Values.proxy }}
+  {{- if .httpProxy }}
+  NEXSPENCE_PROXY_HTTP_PROXY: {{ .httpProxy | quote }}
+  {{- end }}
+  {{- if .httpsProxy }}
+  NEXSPENCE_PROXY_HTTPS_PROXY: {{ .httpsProxy | quote }}
+  {{- end }}
+  {{- if .socks5Proxy }}
+  NEXSPENCE_PROXY_SOCKS5_PROXY: {{ .socks5Proxy | quote }}
+  {{- end }}
+  {{- if .noProxy }}
+  NEXSPENCE_PROXY_NO_PROXY: {{ .noProxy | quote }}
+  {{- end }}
+  {{- if .username }}
+  NEXSPENCE_PROXY_USERNAME: {{ .username | quote }}
+  {{- end }}
+  {{- end }}
+  NEXSPENCE_SCAN_ENABLED: {{ .Values.scan.enabled | quote }}
+  NEXSPENCE_SCAN_SCHEDULE: {{ .Values.scan.schedule | quote }}
+  NEXSPENCE_GC_ENABLED: {{ .Values.gc.enabled | quote }}
+  NEXSPENCE_GC_SCHEDULE: {{ .Values.gc.schedule | quote }}
+  NEXSPENCE_GC_MIN_AGE: {{ .Values.gc.minAge | quote }}
+  NEXSPENCE_AUDIT_RETENTION_DAYS: {{ .Values.audit.retentionDays | quote }}
+  NEXSPENCE_AUDIT_SOFT_CAP: {{ .Values.audit.softCap | int64 | quote }}
+  NEXSPENCE_AUDIT_ROTATION_INTERVAL: {{ .Values.audit.rotationInterval | quote }}
+  NEXSPENCE_AUDIT_LOOKAHEAD_MONTHS: {{ .Values.audit.lookaheadMonths | quote }}
+  NEXSPENCE_DATABASE_MAX_CONNS: {{ .Values.database.maxConns | quote }}
+  NEXSPENCE_DATABASE_MIN_CONNS: {{ .Values.database.minConns | quote }}
+  NEXSPENCE_DATABASE_MAX_IDLE_SEC: {{ .Values.database.maxIdleSec | quote }}
+  NEXSPENCE_CLEANUP_DEFAULT_SCHEDULE: {{ .Values.cleanup.defaultSchedule | quote }}
+  NEXSPENCE_SEARCH_MIN_QUERY_LEN: {{ .Values.search.minQueryLen | quote }}
   NEXSPENCE_TRACING_ENABLED: {{ .Values.tracing.enabled | quote }}
   {{- if .Values.tracing.enabled }}
   NEXSPENCE_TRACING_OTLP_ENDPOINT: {{ .Values.tracing.otlpEndpoint | quote }}
@@ -47,7 +100,61 @@ data:
   NEXSPENCE_TRACING_ENVIRONMENT: {{ .Values.tracing.environment | quote }}
   {{- end }}
   NEXSPENCE_OIDC_ENABLED: {{ .Values.oidc.enabled | quote }}
-  {{- if or .Values.redis.enabled .Values.externalRedis.enabled }}
+  NEXSPENCE_LDAP_ENABLED: {{ .Values.ldap.enabled | quote }}
+  {{- if .Values.ldap.enabled }}
+  NEXSPENCE_LDAP_HOST: {{ .Values.ldap.host | quote }}
+  NEXSPENCE_LDAP_PORT: {{ .Values.ldap.port | quote }}
+  NEXSPENCE_LDAP_USE_TLS: {{ .Values.ldap.useTLS | quote }}
+  NEXSPENCE_LDAP_START_TLS: {{ .Values.ldap.startTLS | quote }}
+  NEXSPENCE_LDAP_INSECURE_SKIP_VERIFY: {{ .Values.ldap.insecureSkipVerify | quote }}
+  NEXSPENCE_LDAP_BIND_DN: {{ .Values.ldap.bindDN | quote }}
+  NEXSPENCE_LDAP_SEARCH_BASE: {{ .Values.ldap.searchBase | quote }}
+  NEXSPENCE_LDAP_SEARCH_FILTER: {{ .Values.ldap.searchFilter | quote }}
+  NEXSPENCE_LDAP_USER_ATTRIBUTES_EMAIL: {{ .Values.ldap.userAttributes.email | quote }}
+  NEXSPENCE_LDAP_USER_ATTRIBUTES_FIRST_NAME: {{ .Values.ldap.userAttributes.firstName | quote }}
+  NEXSPENCE_LDAP_USER_ATTRIBUTES_LAST_NAME: {{ .Values.ldap.userAttributes.lastName | quote }}
+  NEXSPENCE_LDAP_GROUP_BASE: {{ .Values.ldap.groupBase | quote }}
+  NEXSPENCE_LDAP_GROUP_FILTER: {{ .Values.ldap.groupFilter | quote }}
+  NEXSPENCE_LDAP_GROUP_ATTRIBUTE: {{ .Values.ldap.groupAttribute | quote }}
+  NEXSPENCE_LDAP_TIMEOUT_SEC: {{ .Values.ldap.timeoutSec | quote }}
+  NEXSPENCE_LDAP_ADMIN_GROUP: {{ .Values.ldap.adminGroup | quote }}
+  {{- if and (eq .Values.ldap.provisioning "allowlist") (not .Values.ldap.emailAllowlist) }}
+  {{- fail "ldap.emailAllowlist must be non-empty when ldap.provisioning=allowlist" }}
+  {{- end }}
+  NEXSPENCE_LDAP_PROVISIONING: {{ .Values.ldap.provisioning | quote }}
+  {{- with .Values.ldap.emailAllowlist }}
+  NEXSPENCE_LDAP_EMAIL_ALLOWLIST: {{ . | join "," | quote }}
+  {{- end }}
+  {{- end }}
+  NEXSPENCE_SAML_ENABLED: {{ .Values.saml.enabled | quote }}
+  {{- if .Values.saml.enabled }}
+  NEXSPENCE_SAML_DISPLAY_NAME: {{ .Values.saml.displayName | quote }}
+  NEXSPENCE_SAML_SHOW_LOGIN_BUTTON: {{ .Values.saml.showLoginButton | quote }}
+  NEXSPENCE_SAML_FRONTEND_BASE_URL: {{ .Values.saml.frontendBaseUrl | quote }}
+  {{- if not (or .Values.saml.idpMetadataUrl .Values.saml.idpMetadataXml) }}
+  {{- fail "saml.idpMetadataUrl or saml.idpMetadataXml is required when saml.enabled=true" }}
+  {{- end }}
+  NEXSPENCE_SAML_IDP_METADATA_URL: {{ .Values.saml.idpMetadataUrl | quote }}
+  NEXSPENCE_SAML_IDP_METADATA_XML: {{ .Values.saml.idpMetadataXml | quote }}
+  NEXSPENCE_SAML_SP_ENTITY_ID: {{ required "saml.spEntityId is required when saml.enabled=true" .Values.saml.spEntityId | quote }}
+  NEXSPENCE_SAML_ACS_URL: {{ required "saml.acsUrl is required when saml.enabled=true" .Values.saml.acsUrl | quote }}
+  {{- if and (eq .Values.saml.provisioning "allowlist") (not .Values.saml.emailAllowlist) }}
+  {{- fail "saml.emailAllowlist must be non-empty when saml.provisioning=allowlist" }}
+  {{- end }}
+  NEXSPENCE_SAML_PROVISIONING: {{ .Values.saml.provisioning | quote }}
+  {{- with .Values.saml.emailAllowlist }}
+  NEXSPENCE_SAML_EMAIL_ALLOWLIST: {{ . | join "," | quote }}
+  {{- end }}
+  NEXSPENCE_SAML_GROUPS_ATTRIBUTE: {{ .Values.saml.groupsAttribute | quote }}
+  NEXSPENCE_SAML_EMAIL_ATTRIBUTE: {{ .Values.saml.emailAttribute | quote }}
+  NEXSPENCE_SAML_USERNAME_ATTRIBUTE: {{ .Values.saml.usernameAttribute | quote }}
+  NEXSPENCE_SAML_NAME_ATTRIBUTE: {{ .Values.saml.nameAttribute | quote }}
+  NEXSPENCE_SAML_ADMIN_GROUP: {{ .Values.saml.adminGroup | quote }}
+  {{- if .Values.saml.spCertPem }}
+  NEXSPENCE_SAML_SP_CERT_PEM: {{ .Values.saml.spCertPem | quote }}
+  {{- end }}
+  {{- end }}
+  {{- if ne .Values.redis.mode "none" }}
   NEXSPENCE_REDIS_ENABLED: "true"
   NEXSPENCE_REDIS_ADDR: {{ include "nexspence.redisAddr" . | quote }}
   NEXSPENCE_REDIS_DB: {{ include "nexspence.redisDB" . | quote }}
@@ -81,12 +188,12 @@ data:
   NEXSPENCE_STORAGE_AZURE_ENDPOINT: {{ .Values.storage.azure.endpoint | quote }}
   NEXSPENCE_STORAGE_AZURE_SKIP_TLS_VERIFY: {{ .Values.storage.azure.skipTLSVerify | quote }}
   {{- end }}
-{{- if .Values.config.docker.subdomainConnector.aliases }}
+{{- if include "nexspence.needsConfigFile" . }}
 ---
 # A YAML map cannot be an environment variable, so subdomain-connector aliases
-# ride in as a config file mounted over the image's /app/config.yaml. Every
-# other setting still comes from the env above, which viper reads last and so
-# takes precedence over anything in here.
+# and *.role_mappings ride in as a config file mounted over the image's
+# /app/config.yaml. Every other setting still comes from the env above, which
+# viper reads last and so takes precedence over anything in here.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -96,10 +203,33 @@ metadata:
     {{- include "nexspence.labels" . | nindent 4 }}
 data:
   config.yaml: |
+    {{- if .Values.config.docker.subdomainConnector.aliases }}
     docker:
       subdomain_connector:
         aliases:
           {{- range $host, $repo := .Values.config.docker.subdomainConnector.aliases }}
           {{ $host | quote }}: {{ $repo | quote }}
           {{- end }}
+    {{- end }}
+    {{- with .Values.oidc.roleMappings }}
+    oidc:
+      role_mappings:
+        {{- range $claim, $role := . }}
+        {{ $claim | quote }}: {{ $role | quote }}
+        {{- end }}
+    {{- end }}
+    {{- with .Values.ldap.roleMappings }}
+    ldap:
+      role_mappings:
+        {{- range $group, $role := . }}
+        {{ $group | quote }}: {{ $role | quote }}
+        {{- end }}
+    {{- end }}
+    {{- with .Values.saml.roleMappings }}
+    saml:
+      role_mappings:
+        {{- range $group, $role := . }}
+        {{ $group | quote }}: {{ $role | quote }}
+        {{- end }}
+    {{- end }}
 {{- end }}

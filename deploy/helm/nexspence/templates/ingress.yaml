@@ -1,4 +1,4 @@
-{{- if .Values.ingress.enabled -}}
+{{- if eq .Values.exposure.type "ingress" -}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -6,20 +6,20 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "nexspence.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- with .Values.exposure.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  {{- if .Values.ingress.className }}
-  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.exposure.ingress.className }}
+  ingressClassName: {{ .Values.exposure.ingress.className }}
   {{- end }}
-  {{- if .Values.ingress.tls }}
+  {{- if .Values.exposure.ingress.tls }}
   tls:
-    {{- toYaml .Values.ingress.tls | nindent 4 }}
+    {{- toYaml .Values.exposure.ingress.tls | nindent 4 }}
   {{- end }}
   rules:
-    {{- range .Values.ingress.hosts }}
+    {{- range .Values.exposure.hosts }}
     - host: {{ .host | quote }}
       http:
         paths:

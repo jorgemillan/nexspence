@@ -1,4 +1,4 @@
-{{- if .Values.gateway.istio.enabled -}}
+{{- if eq .Values.exposure.type "istioGateway" -}}
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
@@ -6,15 +6,17 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "nexspence.labels" . | nindent 4 }}
-  {{- with .Values.gateway.istio.vsAnnotations }}
+  {{- with .Values.exposure.istioGateway.vsAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
   hosts:
-    {{- toYaml .Values.gateway.istio.hosts | nindent 4 }}
+    {{- range .Values.exposure.hosts }}
+    - {{ .host | quote }}
+    {{- end }}
   gateways:
-    - {{ default (printf "%s-istio" (include "nexspence.fullname" .)) .Values.gateway.istio.existingGateway }}
+    - {{ default (printf "%s-istio" (include "nexspence.fullname" .)) .Values.exposure.istioGateway.existingGateway }}
   http:
     - match:
         - uri:
@@ -24,5 +26,5 @@ spec:
             host: {{ include "nexspence.fullname" . }}
             port:
               number: {{ .Values.service.port }}
-      timeout: {{ .Values.gateway.istio.timeout }}
+      timeout: {{ .Values.exposure.istioGateway.timeout }}
 {{- end }}
