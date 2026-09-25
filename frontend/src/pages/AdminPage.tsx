@@ -1121,7 +1121,7 @@ export default function AdminPage() {
   const [bsEnabled, setBsEnabled] = useState(false)
   const [bsSchedule, setBsSchedule] = useState('0 3 * * *')
   const [bsBlobStoreId, setBsBlobStoreId] = useState('')
-  const [bsRetention, setBsRetention] = useState(7)
+  const [bsRetention, setBsRetention] = useState('7')
   const [bsSaving, setBsSaving] = useState(false)
   const [bsSaveError, setBsSaveError] = useState('')
   const [bsSaveOk, setBsSaveOk] = useState(false)
@@ -1203,8 +1203,13 @@ export default function AdminPage() {
     setBsEnabled(backupSettings.enabled)
     setBsSchedule(backupSettings.scheduleCron || '0 3 * * *')
     setBsBlobStoreId(backupSettings.blobStoreId || '')
-    setBsRetention(backupSettings.retentionCount ?? 7)
+    setBsRetention(String(backupSettings.retentionCount ?? 7))
   }, [backupSettings])
+
+  // Kept as the raw input: an emptied field is not "0 = keep all".
+  const bsRetentionValid = /^\d+$/.test(bsRetention.trim())
+
+  const restoreFailed = (restoreResult?.blobsFailed ?? 0) > 0
 
   const handleSaveBackupSettings = async () => {
     setBsSaving(true)
@@ -1215,7 +1220,7 @@ export default function AdminPage() {
         enabled: bsEnabled,
         scheduleCron: bsSchedule,
         blobStoreId: bsBlobStoreId || undefined,
-        retentionCount: bsRetention,
+        retentionCount: Number(bsRetention),
       }
       await nexspenceApi.updateBackupSettings(input)
       setBsSaveOk(true)
@@ -1461,8 +1466,10 @@ export default function AdminPage() {
             </div>
           )}
           {restoreResult && (
-            <div style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: 8, padding: '10px 14px', fontSize: 13 }}>
-              <span style={{ color: 'var(--holo-green)', fontWeight: 600, marginBottom: 6, display: 'block' }}>Restore complete</span>
+            <div style={{ background: restoreFailed ? 'rgba(245,158,11,0.08)' : 'rgba(34,197,94,0.08)', border: restoreFailed ? '1px solid rgba(245,158,11,0.3)' : '1px solid rgba(34,197,94,0.25)', borderRadius: 8, padding: '10px 14px', fontSize: 13 }}>
+              <span style={{ color: restoreFailed ? 'var(--holo-c-amber-400)' : 'var(--holo-green)', fontWeight: 600, marginBottom: 6, display: 'block' }}>
+                {restoreFailed ? 'Restore finished with errors — some blobs could not be written and their assets were skipped' : 'Restore complete'}
+              </span>
               <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' as const }}>
                 {Object.entries(restoreResult).map(([k, v]) => (
                   <span key={k} style={{ color: 'var(--holo-tx-fg-70)' }}>
@@ -1485,7 +1492,7 @@ export default function AdminPage() {
             store above first (not assigned to any repository) if you want backups kept separate from artifact storage.
           </p>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--holo-text)' }}>
-            <input type="checkbox" checked={bsEnabled} onChange={e => setBsEnabled(e.target.checked)} style={{ accentColor: '#3b82f6', width: 14, height: 14 }} />
+            <input type="checkbox" checked={bsEnabled} onChange={e => setBsEnabled(e.target.checked)} style={{ accentColor: 'var(--holo-c-blue)', width: 14, height: 14 }} />
             Enabled
           </label>
           <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' as const }}>
@@ -1504,17 +1511,20 @@ export default function AdminPage() {
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 100 }}>
               <span style={{ fontSize: 11, color: 'var(--holo-text-faint)' }}>Keep last N (0 = keep all)</span>
-              <HoloInput type="number" min={0} value={bsRetention} onChange={e => setBsRetention(Number(e.target.value))} />
+              <HoloInput type="number" min={0} value={bsRetention} onChange={e => setBsRetention(e.target.value)} aria-invalid={!bsRetentionValid} />
             </div>
           </div>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <HoloButton variant="primary" onClick={handleSaveBackupSettings} disabled={bsSaving || (bsEnabled && !bsBlobStoreId)}>
+            <HoloButton variant="primary" onClick={handleSaveBackupSettings} disabled={bsSaving || (bsEnabled && !bsBlobStoreId) || !bsRetentionValid}>
               {bsSaving ? 'Saving…' : 'Save'}
             </HoloButton>
             {bsSaveOk && <span style={{ fontSize: 12, color: 'var(--holo-green)' }}>Saved</span>}
           </div>
           {bsEnabled && !bsBlobStoreId && (
             <span style={{ fontSize: 12, color: 'var(--holo-text-faint)' }}>Pick a destination blob store to enable scheduling.</span>
+          )}
+          {!bsRetentionValid && (
+            <span style={{ fontSize: 12, color: 'var(--holo-text-faint)' }}>Enter how many backups to keep — 0 keeps all of them.</span>
           )}
           {bsSaveError && (
             <div role="alert" style={{ background: 'rgba(255,107,107,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: '10px 14px', color: 'var(--holo-red)', fontSize: 13 }}>
@@ -1622,6 +1632,11 @@ export default function AdminPage() {
                 <strong>{importResult.imported.assets}</strong> assets into{' '}
                 <code style={{ color: 'var(--holo-c-blue-300)' }}>{importResult.imported.repository}</code>
                 {importResult.imported.blobs > 0 && <>, <strong>{importResult.imported.blobs}</strong> blobs</>}.
+                {importResult.imported.blobsFailed > 0 && (
+                  <span style={{ display: 'block', marginTop: 4, color: 'var(--holo-c-amber-400)' }}>
+                    {importResult.imported.blobsFailed} blobs could not be written and their assets were skipped — re-run the import to retry.
+                  </span>
+                )}
               </div>
             )}
             {importError && (

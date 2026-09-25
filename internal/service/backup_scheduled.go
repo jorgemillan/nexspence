@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -32,6 +33,10 @@ const (
 	backupScheduleSyncSpec = "@every 1m"
 )
 
+// backupLockRefresh is how often a running scheduled backup extends its lock
+// (see keepLock). A var, not a const, so tests can shorten it.
+var backupLockRefresh = backupLockTTL / 3
+
 // ErrBackupNoDestination is returned by RunScheduled when scheduling is
 // enabled but no destination blob store is set — in practice because the
 // store was deleted (backup_settings.blob_store_id is ON DELETE SET NULL),
@@ -42,10 +47,18 @@ var ErrBackupNoDestination = errors.New("backup: scheduled backup is enabled but
 
 // ValidateSchedule reports whether expr is a cron expression the scheduler
 // accepts — the same parser cron.AddFunc uses — so callers can reject a bad
-// schedule before persisting it instead of after.
+// schedule before persisting it instead of after. An @every interval under a
+// minute is rejected too: every run is a full export, and the one-run-per-slot
+// guard (ranThisSlot) works in whole minutes.
 func ValidateSchedule(expr string) error {
-	_, err := cron.ParseStandard(expr)
-	return err
+	sched, err := cron.ParseStandard(expr)
+	if err != nil {
+		return err
+	}
+	if every, ok := sched.(cron.ConstantDelaySchedule); ok && every.Delay < time.Minute {
+		return fmt.Errorf("schedule %q runs more often than once a minute", expr)
+	}
+	return nil
 }
 
 // scheduledBackupState holds the pieces of BackupService only the scheduled
@@ -58,6 +71,11 @@ type scheduledBackupState struct {
 	entryID       cron.EntryID
 	hasEntry      bool
 	registered    string // schedule of the current entry, "" when there is none
+	// running is set while this replica runs a scheduled backup. The cron
+	// chain's SkipIfStillRunning only knows the entry it wraps, and a
+	// schedule change registers a new entry while the old one's run may
+	// still be going.
+	running atomic.Bool
 }
 
 // WithSettings attaches the scheduled-backup settings repo. Returns the same
@@ -112,14 +130,10 @@ func (s *BackupService) RunScheduled(ctx context.Context) (key string, err error
 		return "", ErrBackupNoDestination
 	}
 
-	// Unlike storeFor's per-asset fallback in Export/Restore (defensible
-	// there — every store still holds real product data, so "use the
-	// default" is a reasonable best-effort), a resolution failure here must
-	// be a hard error: the whole point of choosing a destination store is to
-	// get bytes OUT of the default one, so silently falling back to it would
-	// misdirect every scheduled backup to the wrong place while still
-	// reporting success — exactly the class of bug this feature exists to
-	// avoid, not reintroduce for itself.
+	// A resolution failure here must be a hard error: the whole point of
+	// choosing a destination store is to get bytes OUT of the default one, so
+	// silently falling back to it would misdirect every scheduled backup to
+	// the wrong place while still reporting success.
 	if s.Resolver == nil {
 		return "", errors.New("backup: no store resolver configured, cannot resolve the destination blob store")
 	}
@@ -142,9 +156,11 @@ func (s *BackupService) RunScheduled(ctx context.Context) (key string, err error
 	tmpPath := tmp.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	if err := s.Export(ctx, tmp); err != nil {
+	exportErr := s.Export(ctx, tmp)
+	var incomplete *IncompleteBackupError
+	if exportErr != nil && !errors.As(exportErr, &incomplete) {
 		_ = tmp.Close()
-		return "", fmt.Errorf("backup: export: %w", err)
+		return "", fmt.Errorf("backup: export: %w", exportErr)
 	}
 	size, err := tmp.Seek(0, io.SeekCurrent)
 	if err == nil {
@@ -167,6 +183,14 @@ func (s *BackupService) RunScheduled(ctx context.Context) (key string, err error
 	// wiped by the next recompute and then under-count on every retention
 	// delete. A quota on the destination store therefore covers artifacts
 	// only, not backups.
+
+	if incomplete != nil {
+		// Kept: a backup missing some blobs still holds all the metadata and
+		// every other blob, which beats having nothing. But the run is a
+		// failure, and retention is not applied, so a string of incomplete
+		// backups never prunes the last complete one.
+		return key, fmt.Errorf("backup: %s is incomplete: %w", key, incomplete)
+	}
 
 	s.applyRetention(ctx, store, settings.RetentionCount)
 	return key, nil
@@ -219,7 +243,7 @@ func (s *BackupService) applyRetention(ctx context.Context, store storage.BlobSt
 // until ctx is canceled. Run as a goroutine (main.go).
 func (s *BackupService) StartScheduler(ctx context.Context) {
 	s.sched.mu.Lock()
-	s.sched.cronScheduler = cron.New(cron.WithChain(cron.Recover(cron.DefaultLogger)))
+	s.sched.cronScheduler = cron.New(cron.WithChain(cron.Recover(cron.DefaultLogger), cron.SkipIfStillRunning(cron.DefaultLogger)))
 	s.sched.mu.Unlock()
 
 	if err := s.ReloadSchedule(ctx); err != nil {
@@ -315,6 +339,12 @@ func (s *BackupService) runScheduledTick(ctx context.Context, registered string)
 }
 
 func (s *BackupService) runOnce(ctx context.Context) {
+	if !s.sched.running.CompareAndSwap(false, true) {
+		s.logWarn("scheduled backup skipped: the previous run is still in progress")
+		return
+	}
+	defer s.sched.running.Store(false)
+
 	start := time.Now()
 	if s.locker != nil {
 		lock, err := s.locker.Acquire(ctx, backupSchedulerLockKey, backupLockTTL)
@@ -324,7 +354,12 @@ func (s *BackupService) runOnce(ctx context.Context) {
 		if err != nil {
 			s.logWarn("backup: lock acquire failed, running unlocked", "err", err)
 		} else {
-			defer func() { _ = lock.Release(ctx) }()
+			// Background, not ctx: keepLock cancels ctx when the lock is lost,
+			// and the release must still go out.
+			defer func() { _ = lock.Release(context.Background()) }()
+			var stop func()
+			ctx, stop = s.keepLock(ctx, lock)
+			defer stop()
 		}
 	}
 	// The lock only covers a run in progress. A replica whose clock is a
@@ -347,15 +382,61 @@ func (s *BackupService) runOnce(ctx context.Context) {
 	} else {
 		s.logInfo("scheduled backup complete", "key", key)
 	}
+	// A run keepLock canceled must still be recorded as the failure it is.
+	recordCtx := context.WithoutCancel(ctx)
 	if s.Settings != nil {
 		// The start time, not the end: ranThisSlot compares it with the cron
 		// slot the next tick belongs to, and a long export must not push it
 		// into that slot.
-		if err := s.Settings.RecordRun(ctx, start, key, errMsg); err != nil {
+		if err := s.Settings.RecordRun(recordCtx, start, key, errMsg); err != nil {
 			s.logWarn("backup: record run failed", "err", err)
 		}
 	}
-	s.recordAuditEvent(ctx, key, runErr)
+	s.recordAuditEvent(recordCtx, key, runErr)
+}
+
+// keepLock extends lock every backupLockRefresh until the returned stop is
+// called. A backup cannot stop at the lock's TTL the way GC and cleanup do —
+// an archive cut short is worthless — so the TTL is extended for as long as
+// the run lasts instead, and another replica's tick keeps finding it held
+// (#490 review). If the lock is lost anyway (Redis lost the key, or a refresh
+// came too late and another replica took it), the returned context is
+// canceled with distlock.ErrLockLost as its cause, so the run stops instead
+// of overlapping the other one. A transient refresh error is only logged; the
+// next tick retries. A lock that cannot be refreshed is left alone.
+func (s *BackupService) keepLock(ctx context.Context, lock distlock.Lock) (context.Context, func()) {
+	r, ok := lock.(distlock.Refresher)
+	if !ok {
+		return ctx, func() {}
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(backupLockRefresh)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				err := r.Refresh(ctx, backupLockTTL)
+				if errors.Is(err, distlock.ErrLockLost) {
+					s.logError("scheduled backup lost its lock, stopping the run", "err", err)
+					cancel(err)
+					return
+				}
+				if err != nil {
+					s.logWarn("backup: lock refresh failed, retrying", "err", err)
+				}
+			}
+		}
+	}()
+	return ctx, func() {
+		close(done)
+		cancel(nil)
+	}
 }
 
 // ranThisSlot reports whether a run was already recorded for the cron slot

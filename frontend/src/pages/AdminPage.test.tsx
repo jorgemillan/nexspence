@@ -745,6 +745,49 @@ describe('AdminPage — Backup tab', () => {
     expect(screen.queryByText('Saved')).not.toBeInTheDocument()
   })
 
+  it('will not save an emptied "Keep last N" as keep-all', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/api/v1/backup/settings', () => HttpResponse.json({ enabled: false, scheduleCron: '0 3 * * *', retentionCount: 3 })),
+    )
+    renderAdmin('backup')
+    // Wait for the loaded settings, or they would overwrite the edit below.
+    await waitFor(() => expect(screen.getByRole('spinbutton')).toHaveValue(3))
+    await user.clear(screen.getByRole('spinbutton'))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    expect(screen.getByText('Enter how many backups to keep — 0 keeps all of them.')).toBeInTheDocument()
+    await user.type(screen.getByRole('spinbutton'), '0')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+  })
+
+  it('does not call a restore that dropped blobs complete', async () => {
+    server.use(
+      http.post('/api/v1/backup/restore', () => HttpResponse.json({ restored: { repositories: 1, blobs: 2, blobsFailed: 3 } })),
+    )
+    renderAdmin('backup')
+    await screen.findByText('System Backup & Restore')
+    const fileInput = document.querySelector('input[type="file"][accept=".tar.gz,.tgz"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [new File(['x'], 'b.tar.gz')] } })
+    expect(await screen.findByText(/Restore finished with errors/)).toBeInTheDocument()
+    expect(screen.queryByText('Restore complete')).not.toBeInTheDocument()
+  })
+
+  it('says which imported blobs could not be written', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.post('/api/v1/repositories/import', () =>
+        HttpResponse.json({ imported: { repository: 'r', components: 1, assets: 0, blobs: 0, blobsFailed: 4, conflictMode: 'skip' } }),
+      ),
+    )
+    renderAdmin('backup')
+    await screen.findByText('Repository Import')
+    const importInput = document.querySelectorAll('input[type="file"][accept=".tar.gz,.tgz"]')[1] as HTMLInputElement
+    fireEvent.change(importInput, { target: { files: [new File(['x'], 'repo.tar.gz')] } })
+    await screen.findByText('repo.tar.gz')
+    await user.click(screen.getByRole('button', { name: /Import Repository/ }))
+    expect(await screen.findByText(/4 blobs could not be written/)).toBeInTheDocument()
+  })
+
   it('shows the last scheduled run and its failure', async () => {
     server.use(
       http.get('/api/v1/backup/settings', () =>

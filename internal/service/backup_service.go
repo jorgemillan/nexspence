@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/nexspence-oss/nexspence/internal/distlock"
 	"github.com/nexspence-oss/nexspence/internal/domain"
@@ -21,16 +22,16 @@ type BackupService struct {
 	Policies   repository.CleanupPolicyRepo
 	Components repository.ComponentRepo
 	Assets     repository.AssetRepo
-	// BlobStore is the fallback used when Resolver is nil or a lookup fails —
-	// kept for backward-compat callers, but every asset read/write should go
-	// through storeFor so a non-default blob store (S3/Azure, or any repo not
+	// BlobStore is the store used when Resolver is nil — kept for
+	// backward-compat callers, but every asset read/write should go through
+	// resolveStore so a non-default blob store (S3/Azure, or any repo not
 	// pinned to the instance default) round-trips through its real bytes.
 	BlobStore storage.BlobStore
 	// Resolver resolves an asset's actual physical blob store by ID, the same
 	// mechanism CleanupService/GCService/ReplicationService already use
 	// (internal/api/router.go's blobRegistry). Without it, Export/Restore/
-	// ImportRepo silently fall back to BlobStore for every asset regardless
-	// of where it really lives — see storeFor.
+	// ImportRepo use BlobStore for every asset regardless of where it really
+	// lives — see resolveStore.
 	Resolver StoreResolver
 
 	// Settings backs the scheduled-backup feature (spec 37) — set via
@@ -44,39 +45,49 @@ type BackupService struct {
 	sched    scheduledBackupState
 }
 
-// storeFor resolves the physical blob store for blobStoreID via Resolver,
-// falling back to BlobStore when no resolver is wired, the id is empty, or
-// resolution fails. Centralizes the fallback so every call site — export's
-// read path, restore/import's write path — treats a store it cannot resolve
-// the same way, instead of three independently-written fallbacks drifting
-// out of sync with each other over time.
+// resolveStore resolves the physical blob store for blobStoreID via Resolver.
+// With no resolver wired, or no id, it returns BlobStore: a single-store setup,
+// where that is the only store there is. Otherwise a store it cannot resolve
+// is an error, never a fallback to BlobStore — a read would then look in the
+// wrong store (a backup silently missing every blob on it) and a write would
+// put bytes where the asset row does not say they are (#490 review). A group
+// is an error too: it holds no bytes of its own, its members do.
 //
 // cache (may be nil) memoises successful resolutions for the length of one
 // Export/Restore/ImportRepo call, so each store costs one blob_stores lookup
 // per operation instead of one per asset. Failures are not cached: the next
 // asset on the same store retries rather than inheriting a transient error.
-func (s *BackupService) storeFor(ctx context.Context, cache storeCache, blobStoreID string) storage.BlobStore {
+func (s *BackupService) resolveStore(ctx context.Context, cache storeCache, blobStoreID string) (storage.BlobStore, error) {
 	if s.Resolver == nil || blobStoreID == "" {
-		return s.BlobStore
+		return s.BlobStore, nil
 	}
 	if store, ok := cache[blobStoreID]; ok {
-		return store
+		return store, nil
 	}
 	bs, err := s.BlobStores.GetByID(ctx, blobStoreID)
-	if err != nil || bs == nil {
-		return s.BlobStore
+	if err != nil {
+		return nil, fmt.Errorf("blob store %s: %w", blobStoreID, err)
+	}
+	if bs == nil {
+		return nil, fmt.Errorf("blob store %s not found", blobStoreID)
+	}
+	if bs.Type == "group" {
+		return nil, fmt.Errorf("blob store %s (%s) is a group, not a physical store", bs.Name, bs.ID)
 	}
 	store, err := s.Resolver.Get(ctx, storage.BlobStoreDescriptor{ID: bs.ID, Type: bs.Type, Config: bs.Config})
-	if err != nil || store == nil {
-		return s.BlobStore
+	if err == nil && store == nil {
+		err = errors.New("resolver returned no store")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve blob store %s (%s): %w", bs.Name, bs.ID, err)
 	}
 	if cache != nil {
 		cache[blobStoreID] = store
 	}
-	return store
+	return store, nil
 }
 
-// storeCache is storeFor's per-operation memo: blob store ID → physical store.
+// storeCache is resolveStore's per-operation memo: blob store ID → physical store.
 type storeCache map[string]storage.BlobStore
 
 // Sentinel errors for per-repository operations.
@@ -95,6 +106,9 @@ type RestoreStats struct {
 	Components int `json:"components"`
 	Assets     int `json:"assets"`
 	Blobs      int `json:"blobs"`
+	// BlobsFailed counts blobs the archive carried but that could not be
+	// written; their assets are not restored (see putArchivedBlob).
+	BlobsFailed int `json:"blobsFailed"`
 }
 
 // backupUser carries the password hash in backup archives (json:"-" hides it in normal API responses).

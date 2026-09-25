@@ -3,11 +3,15 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/nexspence-oss/nexspence/internal/distlock"
 	"github.com/nexspence-oss/nexspence/internal/domain"
 	"github.com/nexspence-oss/nexspence/internal/storage"
 	"github.com/nexspence-oss/nexspence/internal/testutil"
@@ -266,5 +270,166 @@ func TestBackupService_SyncSchedule_FollowsStoredSettings(t *testing.T) {
 	}
 	if n := len(svc.sched.cronScheduler.Entries()); n != 0 {
 		t.Errorf("cron entries = %d, want 0", n)
+	}
+}
+
+// A run still going on this replica — e.g. from the entry of a schedule that
+// has since changed, which SkipIfStillRunning does not know about — must make
+// the next tick skip, not start a second export next to it.
+func TestBackupService_RunOnce_SkipsWhileAnotherRunIsInProgress(t *testing.T) {
+	ctx := context.Background()
+	svc, settings, audit := newInternalBackupSvcWithDest(t, "* * * * *")
+	svc.sched.running.Store(true)
+
+	svc.runOnce(ctx)
+
+	if got := len(audit.Snapshot()); got != 0 {
+		t.Errorf("audit events = %d, want 0 while a run is in progress", got)
+	}
+	if got, _ := settings.Get(ctx); got.LastRunAt != nil {
+		t.Errorf("LastRunAt = %v, want nil: nothing may have run", got.LastRunAt)
+	}
+	if !svc.sched.running.Load() {
+		t.Error("a skipped tick must not clear the in-progress run's flag")
+	}
+}
+
+// refreshLock is a distlock.Lock + distlock.Refresher whose Refresh returns
+// the queued results in order, then keeps returning the last one.
+type refreshLock struct {
+	mu      sync.Mutex
+	results []error
+	calls   int
+}
+
+func (l *refreshLock) Release(context.Context) error { return nil }
+
+func (l *refreshLock) Refresh(context.Context, time.Duration) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls++
+	if len(l.results) == 0 {
+		return nil
+	}
+	err := l.results[0]
+	if len(l.results) > 1 {
+		l.results = l.results[1:]
+	}
+	return err
+}
+
+func (l *refreshLock) Calls() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.calls
+}
+
+type singleLockLocker struct{ lock distlock.Lock }
+
+func (s singleLockLocker) Acquire(context.Context, string, time.Duration) (distlock.Lock, error) {
+	return s.lock, nil
+}
+func (singleLockLocker) ForceRelease(context.Context, string) error { return nil }
+
+func shortLockRefresh(t *testing.T) {
+	t.Helper()
+	prev := backupLockRefresh
+	backupLockRefresh = 5 * time.Millisecond
+	t.Cleanup(func() { backupLockRefresh = prev })
+}
+
+func TestBackupService_KeepLock_RefreshesUntilLost(t *testing.T) {
+	shortLockRefresh(t)
+	svc, _, _ := newInternalBackupSvc()
+	// A transient error is retried; only a lost lock stops the run.
+	lock := &refreshLock{results: []error{nil, errors.New("redis timeout"), nil, distlock.ErrLockLost}}
+
+	ctx, stop := svc.keepLock(context.Background(), lock)
+	defer stop()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("run context was not canceled after the lock was lost")
+	}
+	if cause := context.Cause(ctx); !errors.Is(cause, distlock.ErrLockLost) {
+		t.Errorf("cause = %v, want ErrLockLost", cause)
+	}
+	if got := lock.Calls(); got != 4 {
+		t.Errorf("refresh calls = %d, want 4", got)
+	}
+}
+
+func TestBackupService_KeepLock_StopEndsRefreshing(t *testing.T) {
+	shortLockRefresh(t)
+	svc, _, _ := newInternalBackupSvc()
+	lock := &refreshLock{}
+
+	ctx, stop := svc.keepLock(context.Background(), lock)
+	time.Sleep(30 * time.Millisecond)
+	stop()
+	if lock.Calls() == 0 {
+		t.Fatal("lock was never refreshed")
+	}
+	if !errors.Is(context.Cause(ctx), context.Canceled) {
+		t.Errorf("after stop, cause = %v, want context.Canceled", context.Cause(ctx))
+	}
+	time.Sleep(20 * time.Millisecond)
+	after := lock.Calls()
+	time.Sleep(30 * time.Millisecond)
+	if got := lock.Calls(); got != after {
+		t.Errorf("refresh calls went %d → %d after stop", after, got)
+	}
+}
+
+// blockingGetStore holds every read until the caller's context ends, standing
+// in for an export that outlives its lock.
+type blockingGetStore struct{ *testutil.BlobStore }
+
+func (blockingGetStore) Get(ctx context.Context, _ string) (io.ReadCloser, int64, error) {
+	<-ctx.Done()
+	return nil, 0, ctx.Err()
+}
+
+// ctxCheckingSettings fails RecordRun on a canceled context, as Postgres does.
+type ctxCheckingSettings struct{ *testutil.BackupSettingsRepo }
+
+func (s ctxCheckingSettings) RecordRun(ctx context.Context, at time.Time, key, runErr string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.BackupSettingsRepo.RecordRun(ctx, at, key, runErr)
+}
+
+// A run that loses its lock mid-export stops, and is still recorded as the
+// failure it is — not left looking like it never happened.
+func TestBackupService_RunOnce_LockLostMidExport_StopsAndRecordsFailure(t *testing.T) {
+	shortLockRefresh(t)
+	ctx := context.Background()
+	svc, settings, audit := newInternalBackupSvcWithDest(t, "0 3 * * *")
+	svc.Settings = ctxCheckingSettings{settings}
+	svc.Resolver = testutil.NewFakeResolver(blockingGetStore{testutil.NewBlobStore()})
+	svc.WithLocker(singleLockLocker{&refreshLock{results: []error{distlock.ErrLockLost}}})
+	comp := &domain.Component{RepositoryID: "repo-r1", Repository: "r1", Format: "raw", Name: "a", Version: "1"}
+	if err := svc.Components.Create(ctx, comp); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Assets.Create(ctx, &domain.Asset{ComponentID: comp.ID, RepositoryID: "repo-r1", Repository: "r1", Path: "/a", BlobKey: "aa/bb/a", BlobStoreID: "bs-1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() { svc.runOnce(ctx); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runOnce did not stop after losing its lock")
+	}
+
+	got, _ := settings.Get(ctx)
+	if got.LastRunError == "" || !strings.Contains(got.LastRunError, "lock no longer held") {
+		t.Errorf("LastRunError = %q, want the lost lock as the cause", got.LastRunError)
+	}
+	if events := audit.Snapshot(); len(events) != 1 || events[0].Result != "failure" {
+		t.Errorf("audit events = %+v, want one failure", events)
 	}
 }

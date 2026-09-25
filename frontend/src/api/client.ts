@@ -107,6 +107,7 @@ export interface ImportRepoStats {
   components: number
   assets: number
   blobs: number
+  blobsFailed: number
   conflictMode: string
 }
 

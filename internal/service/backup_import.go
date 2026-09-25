@@ -191,10 +191,13 @@ func (a *backupArchive) unmarshal(name string, v any) {
 
 // ImportRepoStats reports what was imported.
 type ImportRepoStats struct {
-	Repository   string `json:"repository"`
-	Components   int    `json:"components"`
-	Assets       int    `json:"assets"`
-	Blobs        int    `json:"blobs"`
+	Repository string `json:"repository"`
+	Components int    `json:"components"`
+	Assets     int    `json:"assets"`
+	Blobs      int    `json:"blobs"`
+	// BlobsFailed counts blobs that could not be written; their assets are
+	// not imported, so re-running the import retries them.
+	BlobsFailed  int    `json:"blobsFailed"`
 	ConflictMode string `json:"conflictMode"`
 }
 
@@ -268,6 +271,12 @@ func (s *BackupService) ImportRepo(ctx context.Context, r io.Reader, targetName,
 			blobStoreID = bss[0].ID
 		}
 	}
+	// A repository on a group store records, per asset, the physical member
+	// that holds the bytes — never the group, which has none of its own.
+	blobStoreID, err = s.physicalStoreID(ctx, blobStoreID)
+	if err != nil {
+		return nil, err
+	}
 
 	compIDMap := s.importRepoComponents(ctx, components, destRepo, finalName, conflictMode, stats)
 	s.importRepoAssets(ctx, assets, arc, destRepo, finalName, conflictMode, blobStoreID, compIDMap, stats)
@@ -340,14 +349,13 @@ func (s *BackupService) importRepoAssets(ctx context.Context, assets []domain.As
 			}
 		}
 
-		// Restore blob bytes, streamed from the spool rather than held in
-		// memory, to the asset's actual destination store — not always the
-		// instance default (spec 37 fix; was previously always s.BlobStore).
-		if a.BlobKey != "" {
-			if rc, size, ok := arc.openBlob(a.BlobKey); ok {
-				store := s.storeFor(ctx, stores, blobStoreID)
-				_ = store.Put(ctx, a.BlobKey, rc, size)
-				_ = rc.Close()
+		// Restore blob bytes to the asset's actual destination store. A blob
+		// that cannot be written leaves its asset out (see putArchivedBlob).
+		if a.BlobKey != "" && arc.hasBlob(a.BlobKey) {
+			if err := s.putArchivedBlob(ctx, stores, arc, a.BlobKey, blobStoreID); err != nil {
+				s.logWarn("import: blob write failed, asset skipped", "key", a.BlobKey, "err", err)
+				stats.BlobsFailed++
+				continue
 			}
 		}
 
@@ -457,10 +465,54 @@ func (s *BackupService) restoreBlobStores(ctx context.Context, blobStores []doma
 	return bsNameToID, oldBSIDToName
 }
 
-// remapGroupMembers translates a group's archived member ids to this
-// instance's ids (old id → name → id here), dropping members that do not
-// exist here. raw is the member_ids config value as decoded from JSON.
-func remapGroupMembers(raw any, oldBSIDToName, bsNameToID map[string]string) []string {
+// putArchivedBlob streams the archive's spooled payload for key into the
+// store blobStoreID resolves to. The caller skips the asset on an error: a row
+// pointing at bytes that were never written would serve broken downloads.
+// ImportRepo dedups by path, so re-running the import fills the gap.
+func (s *BackupService) putArchivedBlob(ctx context.Context, stores storeCache, arc *backupArchive, key, blobStoreID string) error {
+	store, err := s.resolveStore(ctx, stores, blobStoreID)
+	if err != nil {
+		return err
+	}
+	rc, size, ok := arc.openBlob(key)
+	if !ok {
+		return fmt.Errorf("blob %s: spooled payload unreadable", key)
+	}
+	defer func() { _ = rc.Close() }()
+	return store.Put(ctx, key, rc, size)
+}
+
+// physicalStoreID maps a group blob store to the member an import writes to:
+// the first member with capacity, the write_to_first_fill order uploads use.
+// Round-robin is not reproduced — that needs the upload path's per-process
+// counters, and one import is a single batch anyway. Any other store's id is
+// returned unchanged.
+func (s *BackupService) physicalStoreID(ctx context.Context, id string) (string, error) {
+	if id == "" {
+		return "", nil
+	}
+	bs, err := s.BlobStores.GetByID(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("destination blob store %s: %w", id, err)
+	}
+	if bs == nil || bs.Type != "group" {
+		return id, nil
+	}
+	for _, mid := range groupMemberIDs(bs.Config["member_ids"]) {
+		m, err := s.BlobStores.GetByID(ctx, mid)
+		if err != nil || m == nil || m.Type == "group" {
+			continue
+		}
+		if m.QuotaBytes == nil || m.UsedBytes < *m.QuotaBytes {
+			return m.ID, nil
+		}
+	}
+	return "", fmt.Errorf("group blob store %q has no member that can take the import", bs.Name)
+}
+
+// groupMemberIDs reads a group's member_ids config value as decoded from JSON
+// ([]any) or as set from Go ([]string).
+func groupMemberIDs(raw any) []string {
 	var ids []string
 	switch v := raw.(type) {
 	case []string:
@@ -472,6 +524,14 @@ func remapGroupMembers(raw any, oldBSIDToName, bsNameToID map[string]string) []s
 			}
 		}
 	}
+	return ids
+}
+
+// remapGroupMembers translates a group's archived member ids to this
+// instance's ids (old id → name → id here), dropping members that do not
+// exist here. raw is the member_ids config value as decoded from JSON.
+func remapGroupMembers(raw any, oldBSIDToName, bsNameToID map[string]string) []string {
+	ids := groupMemberIDs(raw)
 	out := make([]string, 0, len(ids))
 	for _, old := range ids {
 		if newID, ok := bsNameToID[oldBSIDToName[old]]; ok {
@@ -636,16 +696,15 @@ func (s *BackupService) restoreAssets(ctx context.Context, assets []domain.Asset
 			newBSID = fallbackBlobStoreID(bsNameToID)
 		}
 
-		// Restore blob bytes, streamed from the spool rather than held in
-		// memory, to the asset's actual destination store — not always the
-		// instance default (spec 37 fix; was previously always s.BlobStore).
-		if a.BlobKey != "" {
-			if rc, size, ok := arc.openBlob(a.BlobKey); ok {
-				store := s.storeFor(ctx, stores, newBSID)
-				_ = store.Put(ctx, a.BlobKey, rc, size)
-				_ = rc.Close()
-				stats.Blobs++
+		// Restore blob bytes to the asset's actual destination store. A blob
+		// that cannot be written leaves its asset out (see putArchivedBlob).
+		if a.BlobKey != "" && arc.hasBlob(a.BlobKey) {
+			if err := s.putArchivedBlob(ctx, stores, arc, a.BlobKey, newBSID); err != nil {
+				s.logWarn("restore: blob write failed, asset skipped", "key", a.BlobKey, "err", err)
+				stats.BlobsFailed++
+				continue
 			}
+			stats.Blobs++
 		}
 
 		a.ComponentID = newCompID
