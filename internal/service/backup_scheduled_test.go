@@ -39,14 +39,25 @@ func TestBackupService_RunScheduled_DisabledIsNoop(t *testing.T) {
 	assert.Empty(t, key)
 }
 
-func TestBackupService_RunScheduled_NoDestinationIsNoop(t *testing.T) {
+// Enabled with no destination happens when the destination store is deleted
+// (ON DELETE SET NULL) — it must fail loudly, not quietly stop backing up.
+func TestBackupService_RunScheduled_EnabledWithoutDestinationIsAnError(t *testing.T) {
 	ctx := context.Background()
 	svc, settings := buildScheduledBackupSvc()
 	require.NoError(t, settings.Upsert(ctx, &domain.BackupSettings{Enabled: true, ScheduleCron: "0 3 * * *", RetentionCount: 7}))
 
 	key, err := svc.RunScheduled(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, key, "enabled but no blob_store_id chosen yet must still be a no-op")
+	require.ErrorIs(t, err, service.ErrBackupNoDestination)
+	assert.Empty(t, key)
+}
+
+func TestValidateSchedule(t *testing.T) {
+	for _, ok := range []string{"0 3 * * *", "* * * * *", "*/15 2 * * 1-5", "@daily"} {
+		assert.NoError(t, service.ValidateSchedule(ok), ok)
+	}
+	for _, bad := range []string{"", "* * * *", "0 3 * * * *", "61 * * * *", "nonsense"} {
+		assert.Error(t, service.ValidateSchedule(bad), bad)
+	}
 }
 
 func TestBackupService_RunScheduled_WritesToConfiguredStore(t *testing.T) {

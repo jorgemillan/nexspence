@@ -24,7 +24,29 @@ const (
 	backupSchedulerLockKey = "backup:scheduled-run"
 	backupLockTTL          = 30 * time.Minute
 	backupKeyPrefix        = "backups/"
+	// backupSlotSkew is how far apart two replicas' clocks may be and still
+	// be recognized as firing for the same cron slot (see ranThisSlot).
+	backupSlotSkew = 10 * time.Second
+	// backupScheduleSyncSpec is how often each replica re-checks the stored
+	// schedule against the one it has registered (see syncSchedule).
+	backupScheduleSyncSpec = "@every 1m"
 )
+
+// ErrBackupNoDestination is returned by RunScheduled when scheduling is
+// enabled but no destination blob store is set — in practice because the
+// store was deleted (backup_settings.blob_store_id is ON DELETE SET NULL),
+// since the API refuses to enable scheduling without one. It is a failure,
+// not a no-op: every cron tick records it, so the admin sees why backups
+// stopped instead of a stale "last run" from before the store went away.
+var ErrBackupNoDestination = errors.New("backup: scheduled backup is enabled but has no destination blob store (was it deleted?)")
+
+// ValidateSchedule reports whether expr is a cron expression the scheduler
+// accepts — the same parser cron.AddFunc uses — so callers can reject a bad
+// schedule before persisting it instead of after.
+func ValidateSchedule(expr string) error {
+	_, err := cron.ParseStandard(expr)
+	return err
+}
 
 // scheduledBackupState holds the pieces of BackupService only the scheduled
 // path needs, kept separate from the manual Export/Restore/ImportRepo fields
@@ -35,6 +57,7 @@ type scheduledBackupState struct {
 	cronScheduler *cron.Cron
 	entryID       cron.EntryID
 	hasEntry      bool
+	registered    string // schedule of the current entry, "" when there is none
 }
 
 // WithSettings attaches the scheduled-backup settings repo. Returns the same
@@ -72,9 +95,8 @@ func (s *BackupService) WithAudit(a repository.AuditRepo) *BackupService {
 // destination blob store, then applies retention. Returns the written key
 // (empty when it was a no-op) so callers can record it.
 //
-// No-op when scheduling is disabled or no destination store is configured —
-// callers (the cron entry, or a manual "run now") get a nil error either way,
-// since neither is a failure, just nothing to do yet.
+// No-op (nil error, empty key) when scheduling is disabled. Enabled with no
+// destination store is ErrBackupNoDestination, not a no-op.
 func (s *BackupService) RunScheduled(ctx context.Context) (key string, err error) {
 	if s.Settings == nil {
 		return "", errors.New("backup: scheduled backup is not configured (no settings repo wired)")
@@ -83,8 +105,11 @@ func (s *BackupService) RunScheduled(ctx context.Context) (key string, err error
 	if err != nil {
 		return "", fmt.Errorf("backup: load settings: %w", err)
 	}
-	if !settings.Enabled || settings.BlobStoreID == "" {
+	if !settings.Enabled {
 		return "", nil
+	}
+	if settings.BlobStoreID == "" {
+		return "", ErrBackupNoDestination
 	}
 
 	// Unlike storeFor's per-asset fallback in Export/Restore (defensible
@@ -136,27 +161,22 @@ func (s *BackupService) RunScheduled(ctx context.Context) (key string, err error
 	if putErr != nil {
 		return "", fmt.Errorf("backup: put %s: %w", key, putErr)
 	}
-	// Every other write path funnels through base.RegisterStoredBlob, which
-	// keeps blob_stores.used_bytes (the DB counter quota checks actually
-	// read, see base/store.go's quotaHeadroom) in sync with what's really in
-	// the store. This path writes straight through store.Put and skips that
-	// entirely, so a multi-GB backup would otherwise never count against its
-	// destination's quota — do the same increment here (#490 review).
-	if err := s.BlobStores.UpdateUsedBytes(ctx, bs.Name, size); err != nil {
-		s.logWarn("backup: update used_bytes failed", "store", bs.Name, "err", err)
-	}
+	// Deliberately not counted in blob_stores.used_bytes: that counter is
+	// derived from asset rows (RecomputeUsedBytes rebuilds it from them
+	// alone), and a backup has none, so any manual increment here would be
+	// wiped by the next recompute and then under-count on every retention
+	// delete. A quota on the destination store therefore covers artifacts
+	// only, not backups.
 
-	s.applyRetention(ctx, bs.Name, store, settings.RetentionCount)
+	s.applyRetention(ctx, store, settings.RetentionCount)
 	return key, nil
 }
 
 // applyRetention keeps the retentionCount most recently modified backups/
 // entries in store, deleting older ones. No-op for retentionCount <= 0
 // (unlimited) — an explicit opt-out, not the zero-value default (Get returns
-// 7 when the settings row has never been written). storeName is the row name
-// UpdateUsedBytes is keyed by — the same store RunScheduled just resolved bs
-// from.
-func (s *BackupService) applyRetention(ctx context.Context, storeName string, store storage.BlobStore, retentionCount int) {
+// 7 when the settings row has never been written).
+func (s *BackupService) applyRetention(ctx context.Context, store storage.BlobStore, retentionCount int) {
 	if retentionCount <= 0 {
 		return
 	}
@@ -191,10 +211,6 @@ func (s *BackupService) applyRetention(ctx context.Context, storeName string, st
 	for _, e := range backups[retentionCount:] {
 		if err := store.Delete(ctx, e.Key); err != nil {
 			s.logWarn("backup retention: delete failed", "key", e.Key, "err", err)
-			continue
-		}
-		if err := s.BlobStores.UpdateUsedBytes(ctx, storeName, -e.Size); err != nil {
-			s.logWarn("backup retention: update used_bytes failed", "key", e.Key, "err", err)
 		}
 	}
 }
@@ -209,9 +225,42 @@ func (s *BackupService) StartScheduler(ctx context.Context) {
 	if err := s.ReloadSchedule(ctx); err != nil {
 		s.logError("backup: failed to load schedule", "err", err)
 	}
+	// ReloadSchedule only runs on the replica that served the PUT; every other
+	// replica picks the change up here instead — including one that started
+	// with scheduling disabled and so has no entry to notice it with. Without
+	// this, a multi-replica deployment backs up only while that one replica
+	// is alive.
+	if _, err := s.sched.cronScheduler.AddFunc(backupScheduleSyncSpec, func() { s.syncSchedule(context.Background()) }); err != nil {
+		s.logError("backup: failed to start schedule sync", "err", err)
+	}
 	s.sched.cronScheduler.Start()
 	<-ctx.Done()
 	s.sched.cronScheduler.Stop()
+}
+
+// syncSchedule re-registers the cron entry when the stored schedule no longer
+// matches the one this replica has registered ("" when it has none).
+func (s *BackupService) syncSchedule(ctx context.Context) {
+	if s.Settings == nil {
+		return
+	}
+	cur, err := s.Settings.Get(ctx)
+	if err != nil {
+		return
+	}
+	want := ""
+	if cur.Enabled {
+		want = cur.ScheduleCron
+	}
+	s.sched.mu.Lock()
+	have := s.sched.registered
+	s.sched.mu.Unlock()
+	if want == have {
+		return
+	}
+	if err := s.ReloadSchedule(ctx); err != nil {
+		s.logError("backup: failed to sync schedule", "err", err)
+	}
 }
 
 // ReloadSchedule re-reads backup_settings and re-registers the cron entry, so
@@ -226,6 +275,7 @@ func (s *BackupService) ReloadSchedule(ctx context.Context) error {
 	if s.sched.hasEntry {
 		s.sched.cronScheduler.Remove(s.sched.entryID)
 		s.sched.hasEntry = false
+		s.sched.registered = ""
 	}
 	if s.Settings == nil {
 		return nil
@@ -237,15 +287,35 @@ func (s *BackupService) ReloadSchedule(ctx context.Context) error {
 	if !settings.Enabled || settings.ScheduleCron == "" {
 		return nil
 	}
-	id, err := s.sched.cronScheduler.AddFunc(settings.ScheduleCron, func() { s.runOnce(context.Background()) })
+	registered := settings.ScheduleCron
+	id, err := s.sched.cronScheduler.AddFunc(registered, func() { s.runScheduledTick(context.Background(), registered) })
 	if err != nil {
 		return fmt.Errorf("backup: invalid schedule_cron %q: %w", settings.ScheduleCron, err)
 	}
-	s.sched.entryID, s.sched.hasEntry = id, true
+	s.sched.entryID, s.sched.hasEntry, s.sched.registered = id, true, registered
 	return nil
 }
 
+// runScheduledTick is the cron entry's body. ReloadSchedule only runs on the
+// replica that served PUT /api/v1/backup/settings, so until syncSchedule
+// catches up the others still hold an entry for the previous schedule (or
+// for a schedule since disabled). Check the registered expression against
+// the stored one first: a stale entry re-registers itself instead of
+// running at the old time.
+func (s *BackupService) runScheduledTick(ctx context.Context, registered string) {
+	if s.Settings != nil {
+		if cur, err := s.Settings.Get(ctx); err == nil && (!cur.Enabled || cur.ScheduleCron != registered) {
+			if err := s.ReloadSchedule(ctx); err != nil {
+				s.logError("backup: failed to reload a stale schedule", "err", err)
+			}
+			return
+		}
+	}
+	s.runOnce(ctx)
+}
+
 func (s *BackupService) runOnce(ctx context.Context) {
+	start := time.Now()
 	if s.locker != nil {
 		lock, err := s.locker.Acquire(ctx, backupSchedulerLockKey, backupLockTTL)
 		if errors.Is(err, distlock.ErrLockHeld) {
@@ -257,13 +327,17 @@ func (s *BackupService) runOnce(ctx context.Context) {
 			defer func() { _ = lock.Release(ctx) }()
 		}
 	}
+	// The lock only covers a run in progress. A replica whose clock is a
+	// little behind fires the same cron slot after the first one has already
+	// finished and released it; a second backup would then spend a retention
+	// slot for nothing, so skip a slot that already has a recorded run.
+	if s.ranThisSlot(ctx, start) {
+		return
+	}
 	key, runErr := s.RunScheduled(ctx)
 	if runErr == nil && key == "" {
-		// Enabled but nothing to do yet (no destination chosen) — the cron
-		// entry still fires on schedule since ReloadSchedule only gates on
-		// Enabled/ScheduleCron, not BlobStoreID. Recording this as a "run"
-		// would show a misleading "last run: just now" with nothing backed
-		// up, so skip it rather than let the admin mistake it for a real one.
+		// Disabled between the cron tick and this read — nothing ran, so
+		// there is nothing to record.
 		return
 	}
 	errMsg := ""
@@ -274,11 +348,30 @@ func (s *BackupService) runOnce(ctx context.Context) {
 		s.logInfo("scheduled backup complete", "key", key)
 	}
 	if s.Settings != nil {
-		if err := s.Settings.RecordRun(ctx, time.Now(), key, errMsg); err != nil {
+		// The start time, not the end: ranThisSlot compares it with the cron
+		// slot the next tick belongs to, and a long export must not push it
+		// into that slot.
+		if err := s.Settings.RecordRun(ctx, start, key, errMsg); err != nil {
 			s.logWarn("backup: record run failed", "err", err)
 		}
 	}
 	s.recordAuditEvent(ctx, key, runErr)
+}
+
+// ranThisSlot reports whether a run was already recorded for the cron slot
+// that started at or just before now. Cron slots are whole minutes, so the
+// slot is now truncated to the minute, widened by backupSlotSkew for a
+// replica whose clock runs slightly ahead. A settings read failure is not a
+// reason to skip a backup.
+func (s *BackupService) ranThisSlot(ctx context.Context, now time.Time) bool {
+	if s.Settings == nil {
+		return false
+	}
+	cur, err := s.Settings.Get(ctx)
+	if err != nil || cur.LastRunAt == nil {
+		return false
+	}
+	return !cur.LastRunAt.Before(now.Truncate(time.Minute).Add(-backupSlotSkew))
 }
 
 // recordAuditEvent writes the outcome of a scheduled run to Security > Audit

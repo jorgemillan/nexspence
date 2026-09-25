@@ -672,6 +672,91 @@ describe('AdminPage — Backup tab', () => {
     fireEvent.click(screen.getByTitle('Clear'))
     await waitFor(() => expect(screen.queryByText('repo.tar.gz')).not.toBeInTheDocument())
   })
+
+  const backupStores = [
+    { id: 'bs-backups', name: 'backups', type: 's3', usedBytes: 0 },
+    { id: 'bs-group', name: 'grp', type: 'group', usedBytes: 0 },
+  ]
+
+  it('loads scheduled backup settings and lists only non-group stores', async () => {
+    server.use(
+      http.get('/service/rest/v1/blobstores', () => HttpResponse.json(backupStores)),
+      http.get('/api/v1/backup/settings', () =>
+        HttpResponse.json({ enabled: true, scheduleCron: '0 4 * * *', blobStoreId: 'bs-backups', retentionCount: 3 }),
+      ),
+    )
+    renderAdmin('backup')
+    expect(await screen.findByDisplayValue('0 4 * * *')).toBeInTheDocument()
+    expect(screen.getByLabelText('Enabled')).toBeChecked()
+    expect(screen.getByDisplayValue('backups (s3)')).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton')).toHaveValue(3)
+    expect(screen.queryByRole('option', { name: 'grp (group)' })).not.toBeInTheDocument()
+  })
+
+  it('saves scheduled backup settings with the edited values', async () => {
+    const user = userEvent.setup()
+    let body: unknown
+    server.use(
+      http.get('/service/rest/v1/blobstores', () => HttpResponse.json(backupStores)),
+      http.put('/api/v1/backup/settings', async ({ request }) => {
+        body = await request.json()
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    renderAdmin('backup')
+    await screen.findByText('Scheduled Backup')
+    await user.click(screen.getByLabelText('Enabled'))
+    const cron = screen.getByDisplayValue('0 3 * * *')
+    await user.clear(cron)
+    await user.type(cron, '0 1 * * *')
+    await screen.findByRole('option', { name: 'backups (s3)' })
+    await user.selectOptions(screen.getByDisplayValue('Select a blob store…'), 'bs-backups')
+    const keep = screen.getByRole('spinbutton')
+    await user.clear(keep)
+    await user.type(keep, '2')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(body).toEqual({ enabled: true, scheduleCron: '0 1 * * *', blobStoreId: 'bs-backups', retentionCount: 2 })
+  })
+
+  it('will not save an enabled schedule without a destination store', async () => {
+    const user = userEvent.setup()
+    renderAdmin('backup')
+    await screen.findByText('Scheduled Backup')
+    await user.click(screen.getByLabelText('Enabled'))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    expect(screen.getByText('Pick a destination blob store to enable scheduling.')).toBeInTheDocument()
+  })
+
+  it('shows the server error when saving is rejected', async () => {
+    const user = userEvent.setup()
+    server.use(
+      http.get('/service/rest/v1/blobstores', () => HttpResponse.json(backupStores)),
+      http.put('/api/v1/backup/settings', () =>
+        HttpResponse.json({ error: 'invalid scheduleCron "* * * *"' }, { status: 400 }),
+      ),
+    )
+    renderAdmin('backup')
+    await screen.findByText('Scheduled Backup')
+    await screen.findByRole('option', { name: 'backups (s3)' })
+    await user.selectOptions(screen.getByDisplayValue('Select a blob store…'), 'bs-backups')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('invalid scheduleCron "* * * *"')
+    expect(screen.queryByText('Saved')).not.toBeInTheDocument()
+  })
+
+  it('shows the last scheduled run and its failure', async () => {
+    server.use(
+      http.get('/api/v1/backup/settings', () =>
+        HttpResponse.json({
+          enabled: true, scheduleCron: '0 3 * * *', retentionCount: 7,
+          lastRunAt: '2026-09-24T03:00:00Z', lastRunError: 'destination blob store was deleted',
+        }),
+      ),
+    )
+    renderAdmin('backup')
+    expect(await screen.findByText(/failed: destination blob store was deleted/)).toBeInTheDocument()
+  })
 })
 
 describe('AdminPage — Routing Rules tab', () => {

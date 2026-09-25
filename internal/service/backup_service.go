@@ -50,9 +50,17 @@ type BackupService struct {
 // read path, restore/import's write path — treats a store it cannot resolve
 // the same way, instead of three independently-written fallbacks drifting
 // out of sync with each other over time.
-func (s *BackupService) storeFor(ctx context.Context, blobStoreID string) storage.BlobStore {
+//
+// cache (may be nil) memoises successful resolutions for the length of one
+// Export/Restore/ImportRepo call, so each store costs one blob_stores lookup
+// per operation instead of one per asset. Failures are not cached: the next
+// asset on the same store retries rather than inheriting a transient error.
+func (s *BackupService) storeFor(ctx context.Context, cache storeCache, blobStoreID string) storage.BlobStore {
 	if s.Resolver == nil || blobStoreID == "" {
 		return s.BlobStore
+	}
+	if store, ok := cache[blobStoreID]; ok {
+		return store
 	}
 	bs, err := s.BlobStores.GetByID(ctx, blobStoreID)
 	if err != nil || bs == nil {
@@ -62,8 +70,14 @@ func (s *BackupService) storeFor(ctx context.Context, blobStoreID string) storag
 	if err != nil || store == nil {
 		return s.BlobStore
 	}
+	if cache != nil {
+		cache[blobStoreID] = store
+	}
 	return store
 }
+
+// storeCache is storeFor's per-operation memo: blob store ID → physical store.
+type storeCache map[string]storage.BlobStore
 
 // Sentinel errors for per-repository operations.
 var (

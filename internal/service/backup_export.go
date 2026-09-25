@@ -38,12 +38,13 @@ func (aw *archiveWriter) Close() error {
 // (deduplicated by blob key); unreadable blobs are skipped.
 func (s *BackupService) writeBlobEntries(ctx context.Context, tw *tar.Writer, assets []domain.Asset) error {
 	seen := map[string]bool{}
+	stores := storeCache{}
 	for _, a := range assets {
 		if a.BlobKey == "" || seen[a.BlobKey] {
 			continue
 		}
 		seen[a.BlobKey] = true
-		store := s.storeFor(ctx, a.BlobStoreID)
+		store := s.storeFor(ctx, stores, a.BlobStoreID)
 		rc, size, err := store.Get(ctx, a.BlobKey)
 		if err != nil {
 			continue

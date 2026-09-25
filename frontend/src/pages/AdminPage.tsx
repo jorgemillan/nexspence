@@ -1503,7 +1503,7 @@ export default function AdminPage() {
               </select>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 100 }}>
-              <span style={{ fontSize: 11, color: 'var(--holo-text-faint)' }}>Keep last N</span>
+              <span style={{ fontSize: 11, color: 'var(--holo-text-faint)' }}>Keep last N (0 = keep all)</span>
               <HoloInput type="number" min={0} value={bsRetention} onChange={e => setBsRetention(Number(e.target.value))} />
             </div>
           </div>

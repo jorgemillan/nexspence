@@ -44,6 +44,12 @@ type BlobStore interface {
 
 	// ListEntries returns every blob in the store with its size and last-modified
 	// time. Used by GC to age-gate orphan deletion.
+	//
+	// Keys under the reserved "backups/" prefix are scheduled backup archives
+	// (spec 37): they have no asset row by design, and GC skips them rather
+	// than collecting them as orphans. Anything else written to a store
+	// without an asset row is an orphan to GC — a new kind of non-asset key
+	// needs its own reserved prefix and the matching skip in GC.
 	ListEntries(ctx context.Context) ([]BlobEntry, error)
 }
 
