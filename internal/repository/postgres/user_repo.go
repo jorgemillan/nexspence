@@ -117,10 +117,14 @@ func translateUserUnique(err error) error {
 }
 
 func (r *userRepo) Create(ctx context.Context, u *domain.User) error {
+	// A new user has no earlier JWTs to revoke, so it starts with no cutoff
+	// (distant past). now() would revoke a JWT issued in the same second — a
+	// JWT's iat is second-granular — or, with the app's clock a few ms behind
+	// the database's, in the next one: the first login right after a JIT signup.
 	return translateUserUnique(r.db.QueryRow(ctx, `
 		INSERT INTO users (username, email, password_hash, first_name, last_name, status, source,
-		                   must_reset_password)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		                   must_reset_password, tokens_valid_after)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8, 'epoch')
 		RETURNING id, created_at, updated_at`,
 		u.Username, nilIfEmpty(u.Email), nilIfEmpty(u.PasswordHash),
 		u.FirstName, u.LastName, u.Status, u.Source, u.MustResetPassword,
