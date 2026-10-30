@@ -7,6 +7,9 @@ import (
 	"errors"
 	"sort"
 	"testing"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/nexspence-oss/nexspence/internal/domain"
 	"github.com/nexspence-oss/nexspence/internal/repository"
@@ -47,6 +50,33 @@ func TestUserRepo_Create_PopulatesIDAndTimestamps(t *testing.T) {
 	}
 	if u.UpdatedAt.IsZero() {
 		t.Fatal("Create did not populate UpdatedAt")
+	}
+}
+
+// A new user has no earlier JWTs to revoke, so the cutoff it is created with
+// must not reject the first one. A JWT's iat is second-granular: one issued in
+// the very instant the row was written (created_at) must still pass the
+// iat-before-cutoff check, or the first login after a JIT signup gets a 401.
+func TestUserRepo_Create_FirstJWTNotBeforeTokensValidAfter(t *testing.T) {
+	pool := pgtest.Pool(t)
+	pgtest.Truncate(t, pool, "users", "roles")
+	ctx := context.Background()
+	repo := NewUserRepo(pool)
+
+	u := makeUser("first_jwt_user", "first_jwt_user@test.com")
+	if err := repo.Create(ctx, u); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := repo.Get(ctx, "first_jwt_user")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	// The app's clock may trail the database's: a JWT minted a second "before"
+	// the row by the database's clock is still the user's first.
+	iat := jwt.NewNumericDate(got.CreatedAt.Add(-time.Second))
+	if iat.Before(got.TokensValidAfter) {
+		t.Fatalf("a JWT issued at creation (iat %v) reads as revoked by tokens_valid_after %v",
+			iat.Time, got.TokensValidAfter)
 	}
 }
 
