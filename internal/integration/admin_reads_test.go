@@ -4,15 +4,12 @@ package integration
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/nexspence-oss/nexspence/internal/testutil/pgtest"
 )
 
 // adminOnlyReadPaths are the read endpoints #498 found reachable by any
@@ -62,10 +59,6 @@ func loginAsDeveloper(t *testing.T, admin, username string) string {
 		d := authReq(t, http.MethodDelete, "/service/rest/v1/security/users/"+username, nil, admin)
 		d.Body.Close()
 	})
-	// Same second-granularity tokens_valid_after race as TestSelfChangePassword.
-	_, err := pgtest.Pool(t).Exec(context.Background(),
-		`UPDATE users SET tokens_valid_after = now() - interval '1 minute' WHERE username = $1`, username)
-	require.NoError(t, err)
 	return login(t, username, "devPass123!")
 }
 

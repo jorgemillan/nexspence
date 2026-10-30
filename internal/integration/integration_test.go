@@ -192,11 +192,6 @@ func TestSelfChangePassword(t *testing.T) {
 		d := authReq(t, http.MethodDelete, "/service/rest/v1/security/users/pw-change-eve", nil, admin)
 		d.Body.Close()
 	})
-	// Same second-granularity tokens_valid_after race as TestAssetGetByID.
-	_, err := pgtest.Pool(t).Exec(context.Background(),
-		`UPDATE users SET tokens_valid_after = now() - interval '1 minute' WHERE username = 'pw-change-eve'`)
-	require.NoError(t, err)
-
 	eve := login(t, "pw-change-eve", "firstPass123!")
 
 	// Too short for the wired default minimum (8) — refused before any write.
@@ -218,7 +213,7 @@ func TestSelfChangePassword(t *testing.T) {
 
 	// The login path must also see the revocation (second-granularity iat
 	// would otherwise let a token minted in the same second pass).
-	_, err = pgtest.Pool(t).Exec(context.Background(),
+	_, err := pgtest.Pool(t).Exec(context.Background(),
 		`UPDATE users SET tokens_valid_after = now() - interval '1 minute' WHERE username = 'pw-change-eve'`)
 	require.NoError(t, err)
 
@@ -267,11 +262,6 @@ func TestAdminSelfChangePassword(t *testing.T) {
 		d := authReq(t, http.MethodDelete, "/service/rest/v1/security/users/pw-admin-eve", nil, admin)
 		d.Body.Close()
 	})
-	// Same second-granularity tokens_valid_after race as TestAssetGetByID.
-	_, err = pgtest.Pool(t).Exec(context.Background(),
-		`UPDATE users SET tokens_valid_after = now() - interval '1 minute' WHERE username = 'pw-admin-eve'`)
-	require.NoError(t, err)
-
 	eve := login(t, "pw-admin-eve", "firstPass123!")
 
 	wrongResp := authReq(t, http.MethodPut, "/api/v1/me/change-password",
@@ -309,9 +299,6 @@ func TestAdminResetsLocalUserPassword(t *testing.T) {
 		d := authReq(t, http.MethodDelete, "/service/rest/v1/security/users/pw-reset-bob", nil, admin)
 		d.Body.Close()
 	})
-	_, err := pgtest.Pool(t).Exec(context.Background(),
-		`UPDATE users SET tokens_valid_after = now() - interval '1 minute' WHERE username = 'pw-reset-bob'`)
-	require.NoError(t, err)
 	require.NotEmpty(t, login(t, "pw-reset-bob", "firstPass123!"))
 
 	rst := authReq(t, http.MethodPut, "/service/rest/v1/security/users/pw-reset-bob/change-password",
@@ -319,7 +306,7 @@ func TestAdminResetsLocalUserPassword(t *testing.T) {
 	rst.Body.Close()
 	require.Equal(t, http.StatusNoContent, rst.StatusCode)
 
-	_, err = pgtest.Pool(t).Exec(context.Background(),
+	_, err := pgtest.Pool(t).Exec(context.Background(),
 		`UPDATE users SET tokens_valid_after = now() - interval '1 minute' WHERE username = 'pw-reset-bob'`)
 	require.NoError(t, err)
 
@@ -441,13 +428,6 @@ func TestAssetGetByID_DeniedWithoutPrivilege(t *testing.T) {
 		d := authReq(t, http.MethodDelete, "/service/rest/v1/security/users/asset-rbac-eve", nil, admin)
 		d.Body.Close()
 	})
-	// Same second-granularity race as the admin setup in server(): a freshly
-	// created user's tokens_valid_after defaults to now(), and logging in
-	// milliseconds later can produce a JWT whose iat reads as pre-cutoff.
-	_, err = pgtest.Pool(t).Exec(context.Background(),
-		`UPDATE users SET tokens_valid_after = now() - interval '1 minute' WHERE username = 'asset-rbac-eve'`)
-	require.NoError(t, err)
-
 	eve := login(t, "asset-rbac-eve", "evePass123!")
 
 	deniedResp := authReq(t, http.MethodGet, "/service/rest/v1/assets/"+assetID, nil, eve)
