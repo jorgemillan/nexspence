@@ -4,7 +4,6 @@ package integration
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,8 +13,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/nexspence-oss/nexspence/internal/testutil/pgtest"
 )
 
 func createdID(t *testing.T, resp *http.Response) string {
@@ -59,9 +56,6 @@ func selectorUser(t *testing.T, admin, username, expression string, actions ...s
 			d.Body.Close()
 		}
 	})
-	_, err := pgtest.Pool(t).Exec(context.Background(),
-		`UPDATE users SET tokens_valid_after = now() - interval '1 minute' WHERE username = $1`, username)
-	require.NoError(t, err)
 	return login(t, username, "selPass123!")
 }
 
