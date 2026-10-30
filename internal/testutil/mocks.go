@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1998,6 +1999,23 @@ func (r *RoleRepo) ListPrivilegeIDsByRole(_ context.Context, roleID string) ([]s
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string{}, r.rolePrivileges[roleID]...), nil
+}
+
+// ListMemberIDs returns, sorted, the users whose role set contains roleID.
+func (r *RoleRepo) ListMemberIDs(_ context.Context, roleID string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Err != nil {
+		return nil, r.Err
+	}
+	out := []string{}
+	for userID, roleIDs := range r.userRoles {
+		if slices.Contains(roleIDs, roleID) {
+			out = append(out, userID)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // PrivilegesOf returns the privilege IDs last assigned to the role.

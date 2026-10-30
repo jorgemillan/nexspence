@@ -237,6 +237,9 @@ type RoleRepo interface {
 	SetPrivileges(ctx context.Context, roleID string, privilegeIDs []string) error
 	// ListPrivilegeIDsByRole returns privilege IDs for a role (lightweight, for JWT building).
 	ListPrivilegeIDsByRole(ctx context.Context, roleID string) ([]string, error)
+	// ListMemberIDs returns the IDs of the users directly assigned the role.
+	// Read it before Delete, whose cascade empties user_roles.
+	ListMemberIDs(ctx context.Context, roleID string) ([]string, error)
 }
 
 // CleanupPolicyRepo manages cleanup policies.

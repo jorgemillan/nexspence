@@ -179,6 +179,27 @@ func (r *roleRepo) ListPrivilegeIDsByRole(ctx context.Context, roleID string) ([
 	return ids, rows.Err()
 }
 
+func (r *roleRepo) ListMemberIDs(ctx context.Context, roleID string) ([]string, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT user_id FROM user_roles WHERE role_id = $1`, roleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	return ids, rows.Err()
+}
+
 func scanRole(row scanner) (*domain.Role, error) {
 	var ro domain.Role
 	err := row.Scan(&ro.ID, &ro.Name, &ro.Description, &ro.Source, &ro.ReadOnly,
