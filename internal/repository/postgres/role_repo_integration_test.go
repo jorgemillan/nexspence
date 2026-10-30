@@ -606,6 +606,106 @@ func TestRoleRepo_GetUserRoles_FullRoleFields(t *testing.T) {
 	}
 }
 
+// ── ListMemberIDs ─────────────────────────────────────────────────────────────
+
+func TestRoleRepo_ListMemberIDs(t *testing.T) {
+	pool := pgtest.Pool(t)
+	pgtest.Truncate(t, pool, "users", "roles", "privileges", "content_selectors")
+	ctx := context.Background()
+	userRepo := NewUserRepo(pool)
+	roleRepo := NewRoleRepo(pool)
+
+	a, b, c := makeRole("members_a", "local"), makeRole("members_b", "local"), makeRole("members_c", "local")
+	for _, r := range []*domain.Role{a, b, c} {
+		if err := roleRepo.Create(ctx, r); err != nil {
+			t.Fatalf("Create role %s: %v", r.Name, err)
+		}
+	}
+	u1 := makeUser("members_user_1", "members1@test.com")
+	u2 := makeUser("members_user_2", "members2@test.com")
+	u3 := makeUser("members_user_3", "members3@test.com")
+	for _, u := range []*domain.User{u1, u2, u3} {
+		if err := userRepo.Create(ctx, u); err != nil {
+			t.Fatalf("Create user %s: %v", u.Username, err)
+		}
+	}
+	if err := roleRepo.SetUserRoles(ctx, u1.ID, []string{a.ID}); err != nil {
+		t.Fatalf("SetUserRoles u1: %v", err)
+	}
+	if err := roleRepo.SetUserRoles(ctx, u2.ID, []string{a.ID, b.ID}); err != nil {
+		t.Fatalf("SetUserRoles u2: %v", err)
+	}
+	if err := roleRepo.SetUserRoles(ctx, u3.ID, []string{b.ID}); err != nil {
+		t.Fatalf("SetUserRoles u3: %v", err)
+	}
+
+	got, err := roleRepo.ListMemberIDs(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("ListMemberIDs(a): %v", err)
+	}
+	want := []string{u1.ID, u2.ID}
+	sort.Strings(got)
+	sort.Strings(want)
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("ListMemberIDs(a): got %v, want %v", got, want)
+	}
+
+	got, err = roleRepo.ListMemberIDs(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("ListMemberIDs(b): %v", err)
+	}
+	sort.Strings(got)
+	want = []string{u2.ID, u3.ID}
+	sort.Strings(want)
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("ListMemberIDs(b): got %v, want %v", got, want)
+	}
+
+	got, err = roleRepo.ListMemberIDs(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("ListMemberIDs(c): %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Errorf("ListMemberIDs(c): want a non-nil empty slice, got %#v", got)
+	}
+}
+
+// The user_roles rows go with the role (ON DELETE CASCADE), which is why the
+// role handler reads the members before deleting.
+func TestRoleRepo_ListMemberIDs_EmptyAfterDelete(t *testing.T) {
+	pool := pgtest.Pool(t)
+	pgtest.Truncate(t, pool, "users", "roles", "privileges", "content_selectors")
+	ctx := context.Background()
+	userRepo := NewUserRepo(pool)
+	roleRepo := NewRoleRepo(pool)
+
+	r := makeRole("members_deleted", "local")
+	if err := roleRepo.Create(ctx, r); err != nil {
+		t.Fatalf("Create role: %v", err)
+	}
+	u := makeUser("members_deleted_user", "members_deleted@test.com")
+	if err := userRepo.Create(ctx, u); err != nil {
+		t.Fatalf("Create user: %v", err)
+	}
+	if err := roleRepo.SetUserRoles(ctx, u.ID, []string{r.ID}); err != nil {
+		t.Fatalf("SetUserRoles: %v", err)
+	}
+	if got, err := roleRepo.ListMemberIDs(ctx, r.ID); err != nil || len(got) != 1 || got[0] != u.ID {
+		t.Fatalf("ListMemberIDs before Delete: got %v, %v", got, err)
+	}
+
+	if err := roleRepo.Delete(ctx, r.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	got, err := roleRepo.ListMemberIDs(ctx, r.ID)
+	if err != nil {
+		t.Fatalf("ListMemberIDs after Delete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("user_roles not cascade-deleted: %v", got)
+	}
+}
+
 // ── Delete cascades role_privileges ──────────────────────────────────────────
 
 func TestRoleRepo_Delete_CascadesRolePrivileges(t *testing.T) {
