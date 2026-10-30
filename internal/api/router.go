@@ -364,7 +364,7 @@ func NewRouter(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool, log 
 	webhookH := handlers.NewWebhookHandler(webhookSvc)
 	replH := handlers.NewReplicationHandler(replSvc, log)
 	promotionH := handlers.NewPromotionHandler(promotionSvc).WithRBAC(repoRepo, rbacSvc)
-	roleH := handlers.NewRoleHandler(roleRepo, userRepo)
+	roleH := handlers.NewRoleHandler(roleRepo, userRepo).WithLogger(log)
 	privH := handlers.NewPrivilegeHandler(privilegeRepo, roleRepo)
 	csH := handlers.NewContentSelectorHandler(selectorSvc)
 	accessGraphH := handlers.NewAccessGraphHandler(userRepo, roleRepo, privilegeRepo, csRepo)
