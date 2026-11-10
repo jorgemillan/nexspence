@@ -758,6 +758,7 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Role' } } } }
       responses:
         '204': { description: Updated }
+        '400': { description: Built-in role (readOnly) cannot be modified or deleted }
     delete:
       tags: [Security]
       operationId: deleteRole
@@ -765,6 +766,7 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
         '204': { description: Deleted }
+        '400': { description: Built-in role (readOnly) cannot be modified or deleted }
 
   # ── Security — API Tokens ────────────────────────────────────
 

@@ -323,8 +323,10 @@ Content-Type: application/json
 | `nx-admin` | Full access to everything |
 | `nx-anonymous` | Anonymous user (read-only public repos) |
 | `nx-developer` | Read + publish artifacts |
+| `nx-deployer` | Deployer — upload artifacts |
+| `nx-replication` | Replication service account |
 
-Built-in roles cannot be deleted or modified.
+Built-in roles cannot be deleted or modified through the API (`400`); their privileges can still be set.
 
 ---
 
